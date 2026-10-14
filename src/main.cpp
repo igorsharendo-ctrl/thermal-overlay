@@ -68,7 +68,7 @@ bool menuHover=false, closeHover=false, minimizeHover=false;
 int px(int v) { return MulDiv(v,static_cast<int>(dpi),96); }
 int rowCount() { int n=0; for(int i=0;i<4;i++) if(cfg.mask&(1<<i)) ++n; return n; }
 int cardRows(int group) { return ((cfg.mask>>(group*2))&1)+((cfg.mask>>(group*2+1))&1); }
-int height() { return px(120+std::max(cardRows(0),cardRows(1))*82); }
+int height() { return px(176+std::max(cardRows(0),cardRows(1))*26); }
 
 void LoadSettings() {
     PWSTR folder=nullptr;
@@ -395,35 +395,46 @@ COLORREF Blend(COLORREF a,COLORREF b,int weight) {
 bool HitClose(int x,int y) { return x>=px(378) && x<px(408) && y>=px(10) && y<px(38); }
 bool HitMinimize(int x,int y) { return x>=px(342) && x<px(370) && y>=px(10) && y<px(38); }
 bool HitMenu(int x,int y) { return x>=px(270) && x<px(334) && y>=px(10) && y<px(38); }
-void DrawHistory(HDC dc,int left,int top,int slot,COLORREF foreground,COLORREF background) {
+COLORREF SensorColor(int kind,COLORREF background) {
+    bool light=(GetRValue(background)*299+GetGValue(background)*587+GetBValue(background)*114)>145000;
+    return kind==1?(light?RGB(165,78,13):RGB(242,158,77)):(light?RGB(0,111,151):RGB(78,183,218));
+}
+void DrawHistory(HDC dc,int left,int top,int group,COLORREF foreground,COLORREF background) {
     int saved=SaveDC(dc);
-    const bool temperature=(slot%2)==1;
-    const double maximum=temperature?150.0:100.0;
-    COLORREF color=temperature?RGB(242,158,77):RGB(78,183,218);
     HFONT small=CreateFontW(-px(10),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
-    SelectObject(dc,small); SetBkMode(dc,TRANSPARENT); SetTextColor(dc,foreground);
+    SelectObject(dc,small); SetBkMode(dc,TRANSPARENT);
     RECT label{px(left),px(top),px(left+169),px(top+15)};
-    DrawTextW(dc,temperature?L"Температура · 0–150 °C":L"Загрузка · 0–100 %",-1,&label,DT_LEFT|DT_SINGLELINE|DT_VCENTER);
+    for(int j=0;j<2;j++) if(cfg.mask&(1<<(group*2+j))) {
+        SetTextColor(dc,SensorColor(j,background));
+        DrawTextW(dc,j?L"0–150 °C":L"0–100 %",-1,&label,(j?DT_RIGHT:DT_LEFT)|DT_SINGLELINE|DT_VCENTER);
+    }
     int x=px(left),y=px(top+17),w=px(169),h=px(30);
     HPEN grid=CreatePen(PS_SOLID,1,Blend(background,foreground,18)); SelectObject(dc,grid);
     for(int i=0;i<=2;i++) { MoveToEx(dc,x,y+i*h/2,nullptr); LineTo(dc,x+w,y+i*h/2); }
-    HPEN line=CreatePen(PS_SOLID,std::max(1,px(1)),color); SelectObject(dc,line);
-    ULONGLONG now=GetTickCount64(), previous=0;
-    bool connected=false,any=false;
-    for(const auto& point:history) {
-        double value=point.values[slot];
-        if(now<point.tick || now-point.tick>HistoryDuration || value<0 || !std::isfinite(value)) { connected=false; continue; }
-        int xx=x+w-1-static_cast<int>((now-point.tick)*static_cast<ULONGLONG>(w-1)/HistoryDuration);
-        int yy=y+h-1-static_cast<int>(std::clamp(value/maximum,0.0,1.0)*(h-1));
-        if(connected && point.tick-previous<=2500) LineTo(dc,xx,yy);
-        else { MoveToEx(dc,xx,yy,nullptr); SetPixelV(dc,xx,yy,color); }
-        previous=point.tick; connected=true; any=true;
+    const ULONGLONG now=GetTickCount64();
+    bool any=false;
+    for(int j=0;j<2;j++) {
+        int slot=group*2+j; if(!(cfg.mask&(1<<slot))) continue;
+        double maximum=j?150.0:100.0;
+        COLORREF color=SensorColor(j,background);
+        HPEN line=CreatePen(PS_SOLID,std::max(1,px(1)),color); SelectObject(dc,line);
+        ULONGLONG previous=0; bool connected=false;
+        for(const auto& point:history) {
+            double value=point.values[slot];
+            if(now<point.tick || now-point.tick>HistoryDuration || value<0 || !std::isfinite(value)) { connected=false; continue; }
+            int xx=x+w-1-static_cast<int>((now-point.tick)*static_cast<ULONGLONG>(w-1)/HistoryDuration);
+            int yy=y+h-1-static_cast<int>(std::clamp(value/maximum,0.0,1.0)*(h-1));
+            if(connected && point.tick-previous<=2500) LineTo(dc,xx,yy);
+            else { MoveToEx(dc,xx,yy,nullptr); SetPixelV(dc,xx,yy,color); }
+            previous=point.tick; connected=true; any=true;
+        }
+        SelectObject(dc,grid); DeleteObject(line);
     }
     if(!any) {
         RECT empty{x,y,x+w,y+h}; SetTextColor(dc,foreground);
         DrawTextW(dc,L"Нет данных",-1,&empty,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
     }
-    RestoreDC(dc,saved); DeleteObject(small); DeleteObject(grid); DeleteObject(line);
+    RestoreDC(dc,saved); DeleteObject(small); DeleteObject(grid);
 }
 void Paint(HWND hwnd) {
     PAINTSTRUCT ps{}; HDC target=BeginPaint(hwnd,&ps); RECT r{}; GetClientRect(hwnd,&r);
@@ -475,7 +486,7 @@ void Paint(HWND hwnd) {
     HGDIOBJ oldPen=SelectObject(dc,pen), oldBrush=SelectObject(dc,cardBrush);
     for(int g=0;g<2;g++) {
         int rows=cardRows(g); if(!rows) continue;
-        int cardHeight=58+std::max(cardRows(0),cardRows(1))*82;
+        int cardHeight=114+std::max(cardRows(0),cardRows(1))*26;
         int left=10+g*205;
         RoundRect(dc,px(left),px(top),px(left+195),px(top+cardHeight),px(18),px(18));
         SelectObject(dc,titleFont);
@@ -484,15 +495,12 @@ void Paint(HWND hwnd) {
         int y=top+28;
         for(int j=0;j<2;j++) {
             int i=g*2+j; if(!(cfg.mask&(1<<i))) continue;
-            text(j==0?L"Загрузка ▾":L"Температура ▾",left+13,y,116,DT_LEFT,muted);
+            text(j==0?L"Загрузка ▾":L"Температура ▾",left+13,y,116,DT_LEFT,SensorColor(j,cfg.color));
             text(Value(values[i],j==1),left+124,y,58,DT_RIGHT,fg);
             y+=26;
         }
         int graphTop=top+42+std::max(cardRows(0),cardRows(1))*26;
-        for(int j=0;j<2;j++) if(cfg.mask&(1<<(g*2+j))) {
-            DrawHistory(dc,left+13,graphTop,g*2+j,muted,cfg.color);
-            graphTop+=56;
-        }
+        DrawHistory(dc,left+13,graphTop,g,muted,cfg.color);
         HFONT timeline=CreateFontW(-px(10),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
         SelectObject(dc,timeline); SetTextColor(dc,muted);
         RECT time{px(left+13),px(top+cardHeight-19),px(left+182),px(top+cardHeight-4)};
