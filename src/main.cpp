@@ -479,8 +479,11 @@ COLORREF Blend(COLORREF a,COLORREF b,int weight) {
         (GetGValue(a)*(100-weight)+GetGValue(b)*weight)/100,
         (GetBValue(a)*(100-weight)+GetBValue(b)*weight)/100);
 }
-bool HitMinimize(int x,int y) { return x>=px(width()-42) && x<px(width()-12) && y>=px(10) && y<px(38); }
-bool HitMenu(int x,int y) { return x>=px(width()-114) && x<px(width()-50) && y>=px(10) && y<px(38); }
+int headerWidth() { return std::max(320,width()); }
+int headerX(int x) { return MulDiv(px(x),width(),headerWidth()); }
+int headerY(int y) { return px(24)+MulDiv(px(y)-px(24),width(),headerWidth()); }
+bool HitMinimize(int x,int y) { return x>=headerX(headerWidth()-42) && x<headerX(headerWidth()-12) && y>=headerY(10) && y<headerY(38); }
+bool HitMenu(int x,int y) { return x>=headerX(headerWidth()-114) && x<headerX(headerWidth()-50) && y>=headerY(10) && y<headerY(38); }
 COLORREF SensorColor(int kind,COLORREF background) {
     bool light=(GetRValue(background)*299+GetGValue(background)*587+GetBValue(background)*114)>145000;
     if(kind==2) return light?RGB(113,53,170):RGB(190,139,244);
@@ -544,21 +547,27 @@ void Paint(HWND hwnd) {
     };
     rounded(0,0,width()-1,logicalHeight()-1,32,cfg.color,Blend(cfg.color,fg,22));
     rounded(5,5,width()-10,38,20,Blend(cfg.color,fg,5),Blend(cfg.color,fg,20));
-    rounded(12,10,cfg.vertical?81:132,28,12,Blend(cfg.color,accent,12),Blend(cfg.color,accent,28));
+    int headerState=SaveDC(dc);
+    SetMapMode(dc,MM_ANISOTROPIC);
+    SetWindowExtEx(dc,headerWidth(),headerWidth(),nullptr);
+    SetViewportExtEx(dc,width(),width(),nullptr);
+    SetViewportOrgEx(dc,0,px(24)-MulDiv(px(24),width(),headerWidth()),nullptr);
+    rounded(12,10,132,28,12,Blend(cfg.color,accent,12),Blend(cfg.color,accent,28));
     HFONT brand=CreateFontW(-px(13),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
     SelectObject(dc,brand);
-    if(!cfg.vertical) DrawThermometer(dc,px(22),px(13),px(21),Blend(cfg.color,accent,12),fg,accent);
-    text(L"THERMAL",cfg.vertical?20:48,11,cfg.vertical?65:90,DT_LEFT,fg);
-    rounded(width()-114,10,64,28,12,Blend(cfg.color,fg,menuHover?18:7),Blend(cfg.color,fg,menuHover?40:18));
-    text(L"Меню",width()-114,11,64,DT_CENTER,fg);
-    rounded(width()-42,10,30,28,12,Blend(cfg.color,fg,minimizeHover?18:7),Blend(cfg.color,fg,minimizeHover?40:18));
+    DrawThermometer(dc,px(22),px(13),px(21),Blend(cfg.color,accent,12),fg,accent);
+    text(L"THERMAL",48,11,90,DT_LEFT,fg);
+    rounded(headerWidth()-114,10,64,28,12,Blend(cfg.color,fg,menuHover?18:7),Blend(cfg.color,fg,menuHover?40:18));
+    text(L"Меню",headerWidth()-114,11,64,DT_CENTER,fg);
+    rounded(headerWidth()-42,10,30,28,12,Blend(cfg.color,fg,minimizeHover?18:7),Blend(cfg.color,fg,minimizeHover?40:18));
     HPEN minimizePen=CreatePen(PS_SOLID,std::max(2,px(2)),minimizeHover?fg:muted);
     HGDIOBJ oldMinimizePen=SelectObject(dc,minimizePen);
-    MoveToEx(dc,px(width()-33),px(26),nullptr); LineTo(dc,px(width()-21),px(26));
+    MoveToEx(dc,px(headerWidth()-33),px(26),nullptr); LineTo(dc,px(headerWidth()-21),px(26));
     SelectObject(dc,oldMinimizePen); DeleteObject(minimizePen);
     if(width()>=420 && CpuSetupActive()) text(L"Установка…",151,11,115,DT_LEFT,accent);
     else if(width()>=420 && saveFailed) text(L"Не сохранено",151,11,115,DT_LEFT,accent);
     SelectObject(dc,font); DeleteObject(brand);
+    RestoreDC(dc,headerState);
     Sample s; { std::lock_guard<std::mutex> lock(sampleMutex); s=latest; }
     if(GetTickCount64()-s.tick>5000) s=Sample{};
     auto values=SelectedValues(s);
@@ -1063,7 +1072,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR command,int) {
         if(HitSensor(px(30),px(82))!=0 || HitSensor(px(260),px(82))!=2 || cardRows(0)!=2 || cardRows(1)!=2) ExitProcess(17);
         for(int orientation=0;orientation<2;orientation++) {
         cfg.vertical=orientation!=0;
-        if(cfg.vertical && (width()!=215 || cardWidth()!=195 || 12+81>width()-114)) ExitProcess(33);
+        if(cfg.vertical && (width()!=215 || cardWidth()!=195)) ExitProcess(33);
         for(int panels=1;panels<=7;panels++) {
             cfg.panels=panels; Layout(); SaveSettings();
             if(GetPrivateProfileIntW(L"Window",L"Vertical",2,settingsPath.c_str())!=static_cast<UINT>(orientation)) ExitProcess(32);
