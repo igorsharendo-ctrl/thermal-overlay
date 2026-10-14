@@ -72,6 +72,7 @@ bool CpuSetupActive() { return cpuSetupLaunching || cpuSetupProcess || cpuSetupD
 bool saveFailed=false;
 bool menuHover=false, minimizeHover=false;
 int dragCard=-1,dropCard=-1; bool cardDragging=false; POINT dragStart{};
+HWND dragPreview=nullptr; HBITMAP dragBitmap=nullptr; SIZE dragSize{};
 int px(int v) { return MulDiv(v,static_cast<int>(dpi),96); }
 int rowCount() { int n=0; for(int i=0;i<6;i++) if(cfg.mask&(1<<i)) ++n; return n; }
 int cardRows(int group) { return ((cfg.mask>>(group*2))&1)+((cfg.mask>>(group*2+1))&1); }
@@ -556,7 +557,12 @@ void Paint(HWND hwnd) {
         int rows=cardRows(g); if(!rows) continue;
         int cardHeight=114+maxRows()*26;
         int left=cardLeft(g);
-        RoundRect(dc,px(left),px(top),px(left+cardWidth()),px(top+cardHeight),px(18),px(18));
+        if(cardDragging && dragCard==g && dragPreview) {
+            rounded(left,top,cardWidth(),cardHeight,18,Blend(cfg.color,fg,2),Blend(cfg.color,accent,30));
+            text(L"Перемещение…",left+13,top+cardHeight/2-13,cardWidth()-26,DT_CENTER,muted);
+            continue;
+        }
+        rounded(left,top,cardWidth(),cardHeight,18,Blend(cfg.color,fg,4),dropCard==g?accent:Blend(cfg.color,fg,45));
         rounded(left+4,top+4,cardWidth()-8,23,10,Blend(cfg.color,accent,dropCard==g?28:dragCard==g?18:7),Blend(cfg.color,accent,dropCard==g?65:18));
         SetTextColor(dc,muted);
         text(L"⋮⋮",left+cardWidth()-35,top+2,23,DT_CENTER,muted);
@@ -821,6 +827,48 @@ void SwapCards(int source,int target) {
     auto a=std::find(cfg.order.begin(),cfg.order.end(),source),b=std::find(cfg.order.begin(),cfg.order.end(),target);
     if(a!=cfg.order.end() && b!=cfg.order.end()) std::iter_swap(a,b);
 }
+LRESULT CALLBACK DragPreviewProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
+    if(msg==WM_NCHITTEST) return HTTRANSPARENT;
+    if(msg==WM_MOUSEACTIVATE) return MA_NOACTIVATE;
+    if(msg==WM_ERASEBKGND) return 1;
+    if(msg==WM_PAINT) {
+        PAINTSTRUCT ps{}; HDC dc=BeginPaint(hwnd,&ps),memory=CreateCompatibleDC(dc);
+        if(dragBitmap) { HGDIOBJ old=SelectObject(memory,dragBitmap); BitBlt(dc,0,0,dragSize.cx,dragSize.cy,memory,0,0,SRCCOPY); SelectObject(memory,old); }
+        DeleteDC(memory); EndPaint(hwnd,&ps); return 0;
+    }
+    return DefWindowProcW(hwnd,msg,wp,lp);
+}
+void EndDragPreview() {
+    if(dragPreview) { DestroyWindow(dragPreview); dragPreview=nullptr; }
+    if(dragBitmap) { DeleteObject(dragBitmap); dragBitmap=nullptr; }
+}
+void MoveDragPreview(HWND owner,int x,int y) {
+    if(!dragPreview) return;
+    POINT screen{x-(dragStart.x-px(cardLeft(dragCard))),y-(dragStart.y-px(50))};
+    ClientToScreen(owner,&screen);
+    SetWindowPos(dragPreview,HWND_TOPMOST,screen.x,screen.y,dragSize.cx,dragSize.cy,SWP_NOACTIVATE|SWP_SHOWWINDOW);
+}
+void BeginDragPreview(HWND owner,int x,int y) {
+    EndDragPreview();
+    dragSize={px(cardWidth()),px(114+maxRows()*26)};
+    HDC source=GetDC(owner),memory=CreateCompatibleDC(source);
+    dragBitmap=CreateCompatibleBitmap(source,dragSize.cx,dragSize.cy);
+    if(dragBitmap) {
+        HGDIOBJ old=SelectObject(memory,dragBitmap);
+        BitBlt(memory,0,0,dragSize.cx,dragSize.cy,source,px(cardLeft(dragCard)),px(50),SRCCOPY);
+        SelectObject(memory,old);
+    }
+    DeleteDC(memory); ReleaseDC(owner,source);
+    if(!dragBitmap) return;
+    WNDCLASSW wc{}; wc.lpfnWndProc=DragPreviewProc; wc.hInstance=GetModuleHandleW(nullptr); wc.lpszClassName=L"ThermalCardDragPreview";
+    RegisterClassW(&wc);
+    dragPreview=CreateWindowExW(WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_TOPMOST,wc.lpszClassName,L"",WS_POPUP,0,0,dragSize.cx,dragSize.cy,owner,nullptr,wc.hInstance,nullptr);
+    if(!dragPreview) { EndDragPreview(); return; }
+    HRGN shape=CreateRoundRectRgn(0,0,dragSize.cx+1,dragSize.cy+1,px(18),px(18));
+    if(shape && !SetWindowRgn(dragPreview,shape,FALSE)) DeleteObject(shape);
+    SetLayeredWindowAttributes(dragPreview,0,225,LWA_ALPHA);
+    MoveDragPreview(owner,x,y); UpdateWindow(dragPreview);
+}
 LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     if(taskbarCreated && msg==taskbarCreated) {
         trayVisible=false; if(!AddTray(hwnd)) RestoreOverlay(hwnd); return 0;
@@ -844,7 +892,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     case WM_MOUSEMOVE: {
         if(dragCard>=0) {
             int x=GET_X_LPARAM(lp),y=GET_Y_LPARAM(lp);
-            if(abs(x-dragStart.x)>=GetSystemMetrics(SM_CXDRAG) || abs(y-dragStart.y)>=GetSystemMetrics(SM_CYDRAG)) cardDragging=true;
+            if(!cardDragging && (abs(x-dragStart.x)>=GetSystemMetrics(SM_CXDRAG) || abs(y-dragStart.y)>=GetSystemMetrics(SM_CYDRAG))) {
+                BeginDragPreview(hwnd,x,y); cardDragging=true;
+            }
+            MoveDragPreview(hwnd,x,y);
             dropCard=cardDragging?HitCard(x,y):-1; SetCursor(LoadCursorW(nullptr,IDC_SIZEALL)); InvalidateRect(hwnd,nullptr,FALSE); return 0;
         }
         bool hover=HitMenu(GET_X_LPARAM(lp),GET_Y_LPARAM(lp));
@@ -856,14 +907,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     case WM_LBUTTONUP:
         if(dragCard>=0) {
             int source=dragCard,target=cardDragging?HitCard(GET_X_LPARAM(lp),GET_Y_LPARAM(lp)):-1;
-            dragCard=dropCard=-1; cardDragging=false; ReleaseCapture();
+            EndDragPreview(); dragCard=dropCard=-1; cardDragging=false; ReleaseCapture();
             if(target>=0 && source!=target) { SwapCards(source,target); Layout(); SaveSettings(); }
             InvalidateRect(hwnd,nullptr,FALSE); return 0;
         }
         break;
     case WM_CAPTURECHANGED:
     case WM_CANCELMODE:
-        dragCard=dropCard=-1; cardDragging=false; InvalidateRect(hwnd,nullptr,FALSE); return 0;
+        EndDragPreview(); dragCard=dropCard=-1; cardDragging=false; InvalidateRect(hwnd,nullptr,FALSE); return 0;
     case WM_MOUSELEAVE: menuHover=false; minimizeHover=false; InvalidateRect(hwnd,nullptr,FALSE); return 0;
     case WM_PAINT: Paint(hwnd); return 0;
     case WM_ERASEBKGND: return 1;
@@ -898,7 +949,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     case WM_DISPLAYCHANGE: Layout(); SaveSettings(); return 0;
     case WM_QUERYENDSESSION: SaveSettings(); return TRUE;
     case WM_CLOSE: MinimizeToTray(hwnd); return 0;
-    case WM_DESTROY: if(cpuSetupProcess) { CloseHandle(cpuSetupProcess); cpuSetupProcess=nullptr; } RemoveTray(); SaveSettings(); SetEvent(stopEvent); PostQuitMessage(0); return 0;
+    case WM_DESTROY: EndDragPreview(); if(cpuSetupProcess) { CloseHandle(cpuSetupProcess); cpuSetupProcess=nullptr; } RemoveTray(); SaveSettings(); SetEvent(stopEvent); PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(hwnd,msg,wp,lp);
 }
@@ -963,7 +1014,9 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR command,int) {
         cfg.panels=7; Layout(); SaveSettings();
         SendMessageW(mainWindow,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(px(cardLeft(0)+20),px(62)));
         SendMessageW(mainWindow,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(px(cardLeft(2)+20),px(62)));
+        if(!dragPreview || !dragBitmap || !IsWindowVisible(dragPreview)) ExitProcess(30);
         SendMessageW(mainWindow,WM_LBUTTONUP,0,MAKELPARAM(px(cardLeft(2)+20),px(62)));
+        if(dragPreview || dragBitmap) ExitProcess(31);
         if(cfg.order!=std::array<int,3>{2,1,0} || HitSensor(px(30),px(82))!=4) ExitProcess(28);
         wchar_t order[16]{}; GetPrivateProfileStringW(L"Window",L"Order",L"",order,16,settingsPath.c_str());
         if(std::wstring(order)!=L"210") ExitProcess(29);
