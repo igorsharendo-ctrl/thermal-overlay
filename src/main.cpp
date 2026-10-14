@@ -45,7 +45,7 @@ NOTIFYICONDATAW tray{};
 bool trayVisible=false;
 HICON appIcon=nullptr;
 UINT taskbarCreated=0;
-struct Settings { int x=80,y=80,opacity=85,mask=63,panels=7; COLORREF color=RGB(22,26,34); std::wstring sources[6]; } cfg;
+struct Settings { int x=80,y=80,opacity=85,mask=63,panels=7; COLORREF color=RGB(22,26,34); std::wstring sources[6]; std::array<int,3> order{0,1,2}; } cfg;
 struct Choice { std::wstring id, name; int slot; double value; };
 struct Sample { std::vector<Choice> choices; std::wstring cpuSource=L"Libre Hardware Monitor: максимум CPU"; std::wstring gpuSource=L"Windows: максимум среди GPU"; double cpu=-1,gpu=-1,cpuTemp=-1,gpuTemp=-1,ram=-1,ramTemp=-1,ramUsed=-1,ramTotal=-1,gpuUsed=-1,gpuTotal=-1; ULONGLONG tick=0; } latest;
 struct HistoryPoint { ULONGLONG tick; std::array<double,7> values; };
@@ -71,13 +71,14 @@ bool cpuSetupLaunching=false;
 bool CpuSetupActive() { return cpuSetupLaunching || cpuSetupProcess || cpuSetupDeadline; }
 bool saveFailed=false;
 bool menuHover=false, minimizeHover=false;
+int dragCard=-1,dropCard=-1; bool cardDragging=false; POINT dragStart{};
 int px(int v) { return MulDiv(v,static_cast<int>(dpi),96); }
 int rowCount() { int n=0; for(int i=0;i<6;i++) if(cfg.mask&(1<<i)) ++n; return n; }
 int cardRows(int group) { return ((cfg.mask>>(group*2))&1)+((cfg.mask>>(group*2+1))&1); }
 int panelCount() { return !!(cfg.panels&1)+!!(cfg.panels&2)+!!(cfg.panels&4); }
 int width() { return std::max(320,10+205*panelCount()); }
 int cardWidth() { return panelCount()==1?width()-20:195; }
-int cardLeft(int group) { int n=0; for(int g=0;g<group;g++) if(cfg.panels&(1<<g)) ++n; return 10+n*205; }
+int cardLeft(int group) { int n=0; for(int g:cfg.order) { if(g==group) break; if(cfg.panels&(1<<g)) ++n; } return 10+n*205; }
 int maxRows() { int n=0; for(int g=0;g<3;g++) if(cfg.panels&(1<<g)) n=std::max(n,cardRows(g)+(g>0?1:0)); return n; }
 int height() { return px(176+maxRows()*26); }
 
@@ -93,6 +94,10 @@ void LoadSettings() {
     cfg.opacity=std::clamp(get(L"Opacity",85),20,100);
     cfg.panels=get(L"Panels",7)&7; if(!cfg.panels) cfg.panels=7;
     cfg.mask=get(L"Sensors",63)&63; if(!(cfg.mask&48)) cfg.mask|=48; if(!(cfg.mask&3)) cfg.mask|=3; if(!(cfg.mask&12)) cfg.mask|=12;
+    wchar_t order[16]{}; GetPrivateProfileStringW(L"Window",L"Order",L"012",order,16,settingsPath.c_str());
+    cfg.order={0,1,2};
+    if(wcslen(order)==3 && order[0]>=L'0' && order[0]<=L'2' && order[1]>=L'0' && order[1]<=L'2' && order[2]>=L'0' && order[2]<=L'2' && order[0]!=order[1] && order[0]!=order[2] && order[1]!=order[2])
+        cfg.order={order[0]-L'0',order[1]-L'0',order[2]-L'0'};
     cfg.color=static_cast<COLORREF>(get(L"Color",RGB(22,26,34)))&0xffffff;
     for(int i=0;i<6;i++) {
         wchar_t value[512]{};
@@ -106,6 +111,7 @@ void SaveSettings() {
     std::wstring s=L"[Window]\r\nX="+std::to_wstring(cfg.x)+L"\r\nY="+std::to_wstring(cfg.y)
         +L"\r\nOpacity="+std::to_wstring(cfg.opacity)+L"\r\nSensors="+std::to_wstring(cfg.mask)
         +L"\r\nPanels="+std::to_wstring(cfg.panels)
+        +L"\r\nOrder="+std::to_wstring(cfg.order[0])+std::to_wstring(cfg.order[1])+std::to_wstring(cfg.order[2])
         +L"\r\nColor="+std::to_wstring(cfg.color)+L"\r\n";
     s+=L"[Sources]\r\n";
     for(int i=0;i<6;i++) s+=std::to_wstring(i)+L"="+cfg.sources[i]+L"\r\n";
@@ -521,6 +527,7 @@ void Paint(HWND hwnd) {
         SelectObject(dc,ob); SelectObject(dc,op); DeleteObject(b); DeleteObject(p);
     };
     rounded(0,0,width()-1,height()*96/static_cast<int>(dpi)-1,32,cfg.color,Blend(cfg.color,fg,22));
+    rounded(5,5,width()-10,38,20,Blend(cfg.color,fg,5),Blend(cfg.color,fg,20));
     rounded(12,10,132,28,12,Blend(cfg.color,accent,12),Blend(cfg.color,accent,28));
     HFONT brand=CreateFontW(-px(13),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
     SelectObject(dc,brand);
@@ -550,6 +557,9 @@ void Paint(HWND hwnd) {
         int cardHeight=114+maxRows()*26;
         int left=cardLeft(g);
         RoundRect(dc,px(left),px(top),px(left+cardWidth()),px(top+cardHeight),px(18),px(18));
+        rounded(left+4,top+4,cardWidth()-8,23,10,Blend(cfg.color,accent,dropCard==g?28:dragCard==g?18:7),Blend(cfg.color,accent,dropCard==g?65:18));
+        SetTextColor(dc,muted);
+        text(L"⋮⋮",left+cardWidth()-35,top+2,23,DT_CENTER,muted);
         SelectObject(dc,titleFont);
         text(g==0?L"CPU":g==1?L"GPU":L"RAM",left+13,top+3,cardWidth()-26,DT_LEFT,fg);
         SelectObject(dc,font);
@@ -800,6 +810,17 @@ int HitSensor(int x,int y) {
     return -1;
 }
 
+int HitCard(int x,int y,bool headerOnly=false) {
+    if(y<px(50) || y>= (headerOnly?px(78):height()-px(12))) return -1;
+    for(int group:cfg.order) if(cfg.panels&(1<<group)) {
+        int left=px(cardLeft(group)); if(x>=left && x<left+px(cardWidth())) return group;
+    }
+    return -1;
+}
+void SwapCards(int source,int target) {
+    auto a=std::find(cfg.order.begin(),cfg.order.end(),source),b=std::find(cfg.order.begin(),cfg.order.end(),target);
+    if(a!=cfg.order.end() && b!=cfg.order.end()) std::iter_swap(a,b);
+}
 LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     if(taskbarCreated && msg==taskbarCreated) {
         trayVisible=false; if(!AddTray(hwnd)) RestoreOverlay(hwnd); return 0;
@@ -816,16 +837,33 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         break;
     case WM_SETCURSOR: {
         POINT p{}; GetCursorPos(&p); ScreenToClient(hwnd,&p);
+        if(LOWORD(lp)==HTCLIENT && (HitCard(p.x,p.y,true)>=0 || (p.y<px(46) && !HitMenu(p.x,p.y) && !HitMinimize(p.x,p.y)))) { SetCursor(LoadCursorW(nullptr,IDC_SIZEALL)); return TRUE; }
         if(LOWORD(lp)==HTCLIENT && (HitSensor(p.x,p.y)>=0 || HitMenu(p.x,p.y) || HitMinimize(p.x,p.y))) { SetCursor(LoadCursorW(nullptr,IDC_HAND)); return TRUE; }
         break;
     }
     case WM_MOUSEMOVE: {
+        if(dragCard>=0) {
+            int x=GET_X_LPARAM(lp),y=GET_Y_LPARAM(lp);
+            if(abs(x-dragStart.x)>=GetSystemMetrics(SM_CXDRAG) || abs(y-dragStart.y)>=GetSystemMetrics(SM_CYDRAG)) cardDragging=true;
+            dropCard=cardDragging?HitCard(x,y):-1; SetCursor(LoadCursorW(nullptr,IDC_SIZEALL)); InvalidateRect(hwnd,nullptr,FALSE); return 0;
+        }
         bool hover=HitMenu(GET_X_LPARAM(lp),GET_Y_LPARAM(lp));
         bool minimize=HitMinimize(GET_X_LPARAM(lp),GET_Y_LPARAM(lp));
         if(hover!=menuHover || minimize!=minimizeHover) { menuHover=hover; minimizeHover=minimize; InvalidateRect(hwnd,nullptr,FALSE); }
         TRACKMOUSEEVENT track{}; track.cbSize=sizeof(track); track.dwFlags=TME_LEAVE; track.hwndTrack=hwnd;
         TrackMouseEvent(&track); return 0;
     }
+    case WM_LBUTTONUP:
+        if(dragCard>=0) {
+            int source=dragCard,target=cardDragging?HitCard(GET_X_LPARAM(lp),GET_Y_LPARAM(lp)):-1;
+            dragCard=dropCard=-1; cardDragging=false; ReleaseCapture();
+            if(target>=0 && source!=target) { SwapCards(source,target); Layout(); SaveSettings(); }
+            InvalidateRect(hwnd,nullptr,FALSE); return 0;
+        }
+        break;
+    case WM_CAPTURECHANGED:
+    case WM_CANCELMODE:
+        dragCard=dropCard=-1; cardDragging=false; InvalidateRect(hwnd,nullptr,FALSE); return 0;
     case WM_MOUSELEAVE: menuHover=false; minimizeHover=false; InvalidateRect(hwnd,nullptr,FALSE); return 0;
     case WM_PAINT: Paint(hwnd); return 0;
     case WM_ERASEBKGND: return 1;
@@ -842,10 +880,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     }
     case WM_TIMER: if(wp==1 && !trayVisible) AddTray(hwnd); if(wp==3) PollCpuSetup(hwnd); InvalidateRect(hwnd,nullptr,FALSE); return 0;
     case WM_LBUTTONDOWN:
+        if(int group=HitCard(GET_X_LPARAM(lp),GET_Y_LPARAM(lp),true); group>=0) {
+            dragCard=group; dropCard=-1; cardDragging=false; dragStart={GET_X_LPARAM(lp),GET_Y_LPARAM(lp)}; SetCapture(hwnd); InvalidateRect(hwnd,nullptr,FALSE); return 0;
+        }
         if(HitMinimize(GET_X_LPARAM(lp),GET_Y_LPARAM(lp))) { MinimizeToTray(hwnd); return 0; }
         if(int slot=HitSensor(GET_X_LPARAM(lp),GET_Y_LPARAM(lp)); slot>=0) { POINT p{}; GetCursorPos(&p); SourceMenu(hwnd,slot,p); return 0; }
         if(HitMenu(GET_X_LPARAM(lp),GET_Y_LPARAM(lp))) { POINT p{}; GetCursorPos(&p); Menu(hwnd,p); }
-        else { ReleaseCapture(); SendMessageW(hwnd,WM_NCLBUTTONDOWN,HTCAPTION,lp); } return 0;
+        else if(GET_Y_LPARAM(lp)>=0 && GET_Y_LPARAM(lp)<px(46)) { ReleaseCapture(); SendMessageW(hwnd,WM_NCLBUTTONDOWN,HTCAPTION,lp); } return 0;
     case WM_CONTEXTMENU: {
         POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)}; if(p.x==-1 && p.y==-1) GetCursorPos(&p); Menu(hwnd,p); return 0;
     }
@@ -880,7 +921,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR command,int) {
         wchar_t temp[MAX_PATH]{};
         if(!GetTempPathW(MAX_PATH,temp)) return 10;
         settingsPath=std::wstring(temp)+L"ThermalOverlay-test-"+std::to_wstring(GetCurrentProcessId())+L".ini";
-        cfg.x=80; cfg.y=80; cfg.opacity=65; cfg.mask=63; cfg.panels=7; cfg.color=RGB(31,57,81); cfg.sources[1]=L"/test/temperature/0";
+        cfg.x=80; cfg.y=80; cfg.opacity=65; cfg.mask=63; cfg.panels=7; cfg.order={0,1,2}; cfg.color=RGB(31,57,81); cfg.sources[1]=L"/test/temperature/0";
         SaveSettings();
         if(saveFailed || GetPrivateProfileIntW(L"Window",L"Opacity",0,settingsPath.c_str())!=65 ||
            GetPrivateProfileIntW(L"Window",L"Sensors",0,settingsPath.c_str())!=63 ||
@@ -920,6 +961,13 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR command,int) {
                 if(HitSensor(px(cardLeft(group)+20),px(82))!=group*2) ExitProcess(25);
         }
         cfg.panels=7; Layout(); SaveSettings();
+        SendMessageW(mainWindow,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(px(cardLeft(0)+20),px(62)));
+        SendMessageW(mainWindow,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(px(cardLeft(2)+20),px(62)));
+        SendMessageW(mainWindow,WM_LBUTTONUP,0,MAKELPARAM(px(cardLeft(2)+20),px(62)));
+        if(cfg.order!=std::array<int,3>{2,1,0} || HitSensor(px(30),px(82))!=4) ExitProcess(28);
+        wchar_t order[16]{}; GetPrivateProfileStringW(L"Window",L"Order",L"",order,16,settingsPath.c_str());
+        if(std::wstring(order)!=L"210") ExitProcess(29);
+        cfg.order={0,1,2}; Layout(); SaveSettings();
         SendMessageW(mainWindow,WM_CLOSE,0,0);
         if(!IsWindow(mainWindow)) ExitProcess(21);
         if(!trayVisible || IsWindowVisible(mainWindow)) ExitProcess(18);
