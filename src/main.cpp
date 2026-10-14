@@ -45,15 +45,15 @@ NOTIFYICONDATAW tray{};
 bool trayVisible=false;
 HICON appIcon=nullptr;
 UINT taskbarCreated=0;
-struct Settings { int x=80,y=80,opacity=85,mask=15; COLORREF color=RGB(22,26,34); std::wstring sources[4]; } cfg;
+struct Settings { int x=80,y=80,opacity=85,mask=63,panels=7; COLORREF color=RGB(22,26,34); std::wstring sources[6]; } cfg;
 struct Choice { std::wstring id, name; int slot; double value; };
-struct Sample { std::vector<Choice> choices; std::wstring cpuSource=L"Libre Hardware Monitor: максимум CPU"; std::wstring gpuSource=L"Windows: максимум среди GPU"; double cpu=-1,gpu=-1,cpuTemp=-1,gpuTemp=-1; ULONGLONG tick=0; } latest;
-struct HistoryPoint { ULONGLONG tick; std::array<double,4> values; };
+struct Sample { std::vector<Choice> choices; std::wstring cpuSource=L"Libre Hardware Monitor: максимум CPU"; std::wstring gpuSource=L"Windows: максимум среди GPU"; double cpu=-1,gpu=-1,cpuTemp=-1,gpuTemp=-1,ram=-1,ramTemp=-1,ramUsed=-1,ramTotal=-1,gpuUsed=-1,gpuTotal=-1; ULONGLONG tick=0; } latest;
+struct HistoryPoint { ULONGLONG tick; std::array<double,7> values; };
 std::deque<HistoryPoint> history;
 constexpr ULONGLONG HistoryDuration=180000;
-std::array<double,4> SelectedValues(const Sample& s) {
-    std::array<double,4> values{s.cpu,s.cpuTemp,s.gpu,s.gpuTemp};
-    for(int i=0;i<4;i++) if(!cfg.sources[i].empty()) {
+std::array<double,7> SelectedValues(const Sample& s) {
+    std::array<double,7> values{s.cpu,s.cpuTemp,s.gpu,s.gpuTemp,s.ram,s.ramTemp,s.gpuTotal>0 && s.gpuUsed>=0?s.gpuUsed*100/s.gpuTotal:-1};
+    for(int i=0;i<6;i++) if(!cfg.sources[i].empty()) {
         values[i]=-1;
         for(const auto& c:s.choices) if(c.slot==i && c.id==cfg.sources[i]) { values[i]=c.value; break; }
     }
@@ -72,9 +72,14 @@ bool CpuSetupActive() { return cpuSetupLaunching || cpuSetupProcess || cpuSetupD
 bool saveFailed=false;
 bool menuHover=false, minimizeHover=false;
 int px(int v) { return MulDiv(v,static_cast<int>(dpi),96); }
-int rowCount() { int n=0; for(int i=0;i<4;i++) if(cfg.mask&(1<<i)) ++n; return n; }
+int rowCount() { int n=0; for(int i=0;i<6;i++) if(cfg.mask&(1<<i)) ++n; return n; }
 int cardRows(int group) { return ((cfg.mask>>(group*2))&1)+((cfg.mask>>(group*2+1))&1); }
-int height() { return px(176+std::max(cardRows(0),cardRows(1))*26); }
+int panelCount() { return !!(cfg.panels&1)+!!(cfg.panels&2)+!!(cfg.panels&4); }
+int width() { return std::max(320,10+205*panelCount()); }
+int cardWidth() { return panelCount()==1?width()-20:195; }
+int cardLeft(int group) { int n=0; for(int g=0;g<group;g++) if(cfg.panels&(1<<g)) ++n; return 10+n*205; }
+int maxRows() { int n=0; for(int g=0;g<3;g++) if(cfg.panels&(1<<g)) n=std::max(n,cardRows(g)+(g>0?1:0)); return n; }
+int height() { return px(176+maxRows()*26); }
 
 void LoadSettings() {
     PWSTR folder=nullptr;
@@ -86,9 +91,10 @@ void LoadSettings() {
     auto get=[](const wchar_t* key,int def) { return static_cast<int>(GetPrivateProfileIntW(L"Window",key,def,settingsPath.c_str())); };
     cfg.x=std::clamp(get(L"X",80),-100000,100000); cfg.y=std::clamp(get(L"Y",80),-100000,100000);
     cfg.opacity=std::clamp(get(L"Opacity",85),20,100);
-    cfg.mask=get(L"Sensors",15)&15; if(!(cfg.mask&3)) cfg.mask|=3; if(!(cfg.mask&12)) cfg.mask|=12;
+    cfg.panels=get(L"Panels",7)&7; if(!cfg.panels) cfg.panels=7;
+    cfg.mask=get(L"Sensors",63)&63; if(!(cfg.mask&48)) cfg.mask|=48; if(!(cfg.mask&3)) cfg.mask|=3; if(!(cfg.mask&12)) cfg.mask|=12;
     cfg.color=static_cast<COLORREF>(get(L"Color",RGB(22,26,34)))&0xffffff;
-    for(int i=0;i<4;i++) {
+    for(int i=0;i<6;i++) {
         wchar_t value[512]{};
         GetPrivateProfileStringW(L"Sources",std::to_wstring(i).c_str(),L"",value,512,settingsPath.c_str());
         cfg.sources[i]=value;
@@ -99,9 +105,10 @@ void SaveSettings() {
     RECT r{}; if(mainWindow && GetWindowRect(mainWindow,&r)) { cfg.x=r.left; cfg.y=r.top; }
     std::wstring s=L"[Window]\r\nX="+std::to_wstring(cfg.x)+L"\r\nY="+std::to_wstring(cfg.y)
         +L"\r\nOpacity="+std::to_wstring(cfg.opacity)+L"\r\nSensors="+std::to_wstring(cfg.mask)
+        +L"\r\nPanels="+std::to_wstring(cfg.panels)
         +L"\r\nColor="+std::to_wstring(cfg.color)+L"\r\n";
     s+=L"[Sources]\r\n";
-    for(int i=0;i<4;i++) s+=std::to_wstring(i)+L"="+cfg.sources[i]+L"\r\n";
+    for(int i=0;i<6;i++) s+=std::to_wstring(i)+L"="+cfg.sources[i]+L"\r\n";
     std::wstring tmp=settingsPath+L".tmp";
     HANDLE f=CreateFileW(tmp.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
     saveFailed=true;
@@ -123,10 +130,10 @@ RECT VisibleRect(int x,int y,int w,int h) {
     return {x,y,x+w,y+h};
 }
 void Layout() {
-    RECT r{}; GetWindowRect(mainWindow,&r); r=VisibleRect(r.left,r.top,px(420),height());
+    RECT r{}; GetWindowRect(mainWindow,&r); r=VisibleRect(r.left,r.top,px(width()),height());
     SetWindowPos(mainWindow,HWND_TOPMOST,r.left,r.top,r.right-r.left,r.bottom-r.top,SWP_NOACTIVATE);
     SetLayeredWindowAttributes(mainWindow,0,static_cast<BYTE>(cfg.opacity*255/100),LWA_ALPHA);
-    HRGN shape=CreateRoundRectRgn(0,0,px(420)+1,height()+1,px(32),px(32));
+    HRGN shape=CreateRoundRectRgn(0,0,px(width())+1,height()+1,px(32),px(32));
     if(shape && !SetWindowRgn(mainWindow,shape,TRUE)) DeleteObject(shape);
     InvalidateRect(mainWindow,nullptr,FALSE);
 }
@@ -175,7 +182,7 @@ public:
 
 class Sensors {
     NvidiaSensors nvidia;
-    PDH_HQUERY query=nullptr; PDH_HCOUNTER counter=nullptr;
+    PDH_HQUERY query=nullptr; PDH_HCOUNTER counter=nullptr,memoryCounter=nullptr;
     UINT64 oldIdle=0,oldKernel=0,oldUser=0;
     IWbemServices* wmi=nullptr;
     HMODULE gdi=nullptr;
@@ -185,6 +192,7 @@ public:
     Sensors() {
         if(PdhOpenQueryW(nullptr,0,&query)==ERROR_SUCCESS) {
             if(PdhAddEnglishCounterW(query,L"\\GPU Engine(*)\\Utilization Percentage",0,&counter)!=ERROR_SUCCESS) counter=nullptr;
+            if(PdhAddEnglishCounterW(query,L"\\GPU Adapter Memory(*)\\Dedicated Usage",0,&memoryCounter)!=ERROR_SUCCESS) memoryCounter=nullptr;
             PdhCollectQueryData(query);
         }
         gdi=LoadLibraryExW(L"gdi32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -207,7 +215,7 @@ public:
         oldIdle=i; oldKernel=k; oldUser=u; return value;
     }
     double Gpu(std::vector<Choice>& choices) {
-        if(!query || !counter || PdhCollectQueryData(query)!=ERROR_SUCCESS) return -1;
+        if(!query || PdhCollectQueryData(query)!=ERROR_SUCCESS || !counter) return -1;
         DWORD bytes=0,count=0;
         if(PdhGetFormattedCounterArrayW(counter,PDH_FMT_DOUBLE,&bytes,&count,nullptr)!=static_cast<PDH_STATUS>(PDH_MORE_DATA)) return -1;
         std::vector<BYTE> data(bytes);
@@ -233,6 +241,33 @@ public:
             choices.push_back({L"windows/engine/"+e.first,L"Windows: "+title,2,std::clamp(e.second,0.0,100.0)});
         }
         return std::clamp(value,0.0,100.0);
+    }
+    void GpuMemory(Sample& s) {
+        if(!memoryCounter) return;
+        DWORD bytes=0,count=0;
+        if(PdhGetFormattedCounterArrayW(memoryCounter,PDH_FMT_DOUBLE,&bytes,&count,nullptr)!=static_cast<PDH_STATUS>(PDH_MORE_DATA)) return;
+        std::vector<BYTE> data(bytes); auto items=reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(data.data());
+        if(PdhGetFormattedCounterArrayW(memoryCounter,PDH_FMT_DOUBLE,&bytes,&count,items)!=ERROR_SUCCESS) return;
+        IDXGIFactory1* factory=nullptr;
+        if(FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1),reinterpret_cast<void**>(&factory)))) return;
+        double used=0,total=0; bool complete=true; IDXGIAdapter1* adapter=nullptr;
+        for(UINT n=0;factory->EnumAdapters1(n,&adapter)==S_OK;n++) {
+            DXGI_ADAPTER_DESC1 desc{};
+            if(SUCCEEDED(adapter->GetDesc1(&desc)) && !(desc.Flags&DXGI_ADAPTER_FLAG_SOFTWARE) && desc.DedicatedVideoMemory>0) {
+                wchar_t prefix[80]{}; swprintf_s(prefix,L"luid_0x%08x_0x%08x_phys_",static_cast<unsigned>(desc.AdapterLuid.HighPart),desc.AdapterLuid.LowPart);
+                std::map<std::wstring,double> readings;
+                for(DWORD i=0;i<count;i++) {
+                    auto& v=items[i].FmtValue; std::wstring name=items[i].szName;
+                    if(_wcsnicmp(name.c_str(),prefix,wcslen(prefix))==0 && (v.CStatus==PDH_CSTATUS_VALID_DATA || v.CStatus==PDH_CSTATUS_NEW_DATA) && std::isfinite(v.doubleValue) && v.doubleValue>=0) readings[name]=v.doubleValue;
+                }
+                if(readings.empty()) complete=false;
+                for(const auto& r:readings) used+=r.second;
+                total+=static_cast<double>(desc.DedicatedVideoMemory);
+            }
+            adapter->Release();
+        }
+        factory->Release();
+        if(complete && total>0) { s.gpuUsed=used; s.gpuTotal=total; }
     }
     double GpuTemperature() {
         if(!open || !close || !info) return -1;
@@ -291,13 +326,15 @@ public:
                 std::wstring name=id.bstrVal;
                 bool cpu=name.find(L"/intelcpu/")==0 || name.find(L"/amdcpu/")==0;
                 bool gpu=name.find(L"/gpu-")==0;
+                // DIMM index 0 is the live temperature; other indices are limits/resolution.
+                bool ram=name.find(L"/memory/dimm/")==0 && name.size()>=14 && name.compare(name.size()-14,14,L"/temperature/0")==0;
                 bool temp=kind.vt==VT_BSTR && kind.bstrVal && std::wstring(kind.bstrVal)==L"Temperature";
-                if((cpu || gpu) && SUCCEEDED(VariantChangeType(&number,&v,0,VT_R8))) {
+                if((cpu || gpu || ram) && SUCCEEDED(VariantChangeType(&number,&v,0,VT_R8))) {
                     double t=number.dblVal;
                     if(std::isfinite(t) && (temp?(t>0 && t<150):(t>=0 && t<=100)) && name.find_first_of(L"\r\n=")==std::wstring::npos) {
                         if(cpu && temp) value=std::max(value,t);
                         std::wstring title=(label.vt==VT_BSTR && label.bstrVal)?label.bstrVal:name;
-                        if(choices.size()<512) choices.push_back({name,title,(gpu?2:0)+(temp?1:0),t});
+                        if(choices.size()<512) choices.push_back({name,title,(ram?4:gpu?2:0)+(temp?1:0),t});
                     }
                 }
             }
@@ -307,6 +344,14 @@ public:
         items->Release(); return value;
     }
     Sample Read() { Sample s; s.cpu=Cpu(); s.gpu=Gpu(s.choices); s.gpuTemp=GpuTemperature(); s.cpuTemp=CpuTemperature(s.choices);
+        MEMORYSTATUSEX memory{}; memory.dwLength=sizeof(memory);
+        if(GlobalMemoryStatusEx(&memory) && memory.ullTotalPhys && memory.ullAvailPhys<=memory.ullTotalPhys) {
+            s.ramTotal=static_cast<double>(memory.ullTotalPhys); s.ramUsed=static_cast<double>(memory.ullTotalPhys-memory.ullAvailPhys);
+            s.ram=s.ramUsed*100/s.ramTotal;
+        }
+        GpuMemory(s);
+        for(const auto& c:s.choices) if(c.slot==5) s.ramTemp=std::max(s.ramTemp,c.value);
+        s.choices.push_back({L"windows/ram/load",L"Windows: физическая память",4,s.ram});
         cpu::Snapshot cpuSnapshot;
         if(cpu::ReadShared(cpuSnapshot) && cpuSnapshot.status==0 && cpuSnapshot.count) {
             s.cpuTemp=cpuSnapshot.sensors[0].temperature;
@@ -340,6 +385,10 @@ DWORD WINAPI Worker(void*) {
 std::wstring Value(double v,bool temperature) {
     if(v<0 || !std::isfinite(v)) return L"--";
     std::wostringstream out; out<<std::fixed<<std::setprecision(0)<<v<<(temperature?L" °C":L" %"); return out.str();
+}
+std::wstring MemoryValue(double used,double total) {
+    if(used<0 || total<=0 || !std::isfinite(used) || !std::isfinite(total)) return L"--";
+    std::wostringstream out; out<<std::fixed<<std::setprecision(1)<<used/1073741824.0<<L" / "<<total/1073741824.0<<L" GiB"; return out.str();
 }
 void DrawThermometer(HDC dc,int x,int y,int size,COLORREF background,COLORREF outline,COLORREF mercury) {
     // A compact temperature instrument: flat gauge, scale and Celsius label.
@@ -408,29 +457,30 @@ COLORREF Blend(COLORREF a,COLORREF b,int weight) {
         (GetGValue(a)*(100-weight)+GetGValue(b)*weight)/100,
         (GetBValue(a)*(100-weight)+GetBValue(b)*weight)/100);
 }
-bool HitMinimize(int x,int y) { return x>=px(378) && x<px(408) && y>=px(10) && y<px(38); }
-bool HitMenu(int x,int y) { return x>=px(306) && x<px(370) && y>=px(10) && y<px(38); }
+bool HitMinimize(int x,int y) { return x>=px(width()-42) && x<px(width()-12) && y>=px(10) && y<px(38); }
+bool HitMenu(int x,int y) { return x>=px(width()-114) && x<px(width()-50) && y>=px(10) && y<px(38); }
 COLORREF SensorColor(int kind,COLORREF background) {
     bool light=(GetRValue(background)*299+GetGValue(background)*587+GetBValue(background)*114)>145000;
+    if(kind==2) return light?RGB(113,53,170):RGB(190,139,244);
     return kind==1?(light?RGB(165,78,13):RGB(242,158,77)):(light?RGB(0,111,151):RGB(78,183,218));
 }
 void DrawHistory(HDC dc,int left,int top,int group,COLORREF foreground,COLORREF background) {
     int saved=SaveDC(dc);
     HFONT small=CreateFontW(-px(10),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
     SelectObject(dc,small); SetBkMode(dc,TRANSPARENT);
-    RECT label{px(left),px(top),px(left+169),px(top+15)};
-    for(int j=0;j<2;j++) if(cfg.mask&(1<<(group*2+j))) {
+    RECT label{px(left),px(top),px(left+cardWidth()-26),px(top+15)};
+    for(int j=0;j<(group==1?3:2);j++) if(j==2 || (cfg.mask&(1<<(group*2+j)))) {
         SetTextColor(dc,SensorColor(j,background));
-        DrawTextW(dc,j?L"0–150 °C":L"0–100 %",-1,&label,(j?DT_RIGHT:DT_LEFT)|DT_SINGLELINE|DT_VCENTER);
+        DrawTextW(dc,j==2?L"VRAM %":j?L"°C":L"%",-1,&label,(j==2?DT_RIGHT:j?DT_CENTER:DT_LEFT)|DT_SINGLELINE|DT_VCENTER);
     }
-    int x=px(left),y=px(top+17),w=px(169),h=px(30);
+    int x=px(left),y=px(top+17),w=px(cardWidth()-26),h=px(30);
     HPEN grid=CreatePen(PS_SOLID,1,Blend(background,foreground,18)); SelectObject(dc,grid);
     for(int i=0;i<=2;i++) { MoveToEx(dc,x,y+i*h/2,nullptr); LineTo(dc,x+w,y+i*h/2); }
     const ULONGLONG now=GetTickCount64();
     bool any=false;
-    for(int j=0;j<2;j++) {
-        int slot=group*2+j; if(!(cfg.mask&(1<<slot))) continue;
-        double maximum=j?150.0:100.0;
+    for(int j=0;j<(group==1?3:2);j++) {
+        int slot=j==2?6:group*2+j; if(j!=2 && !(cfg.mask&(1<<slot))) continue;
+        double maximum=j==1?150.0:100.0;
         COLORREF color=SensorColor(j,background);
         HPEN line=CreatePen(PS_SOLID,std::max(1,px(1)),color); SelectObject(dc,line);
         ULONGLONG previous=0; bool connected=false;
@@ -470,21 +520,21 @@ void Paint(HWND hwnd) {
         RoundRect(dc,px(x),px(y),px(x+w),px(y+h),px(radius),px(radius));
         SelectObject(dc,ob); SelectObject(dc,op); DeleteObject(b); DeleteObject(p);
     };
-    rounded(0,0,419,height()*96/static_cast<int>(dpi)-1,32,cfg.color,Blend(cfg.color,fg,22));
+    rounded(0,0,width()-1,height()*96/static_cast<int>(dpi)-1,32,cfg.color,Blend(cfg.color,fg,22));
     rounded(12,10,132,28,12,Blend(cfg.color,accent,12),Blend(cfg.color,accent,28));
     HFONT brand=CreateFontW(-px(13),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
     SelectObject(dc,brand);
     DrawThermometer(dc,px(22),px(13),px(21),Blend(cfg.color,accent,12),fg,accent);
     text(L"THERMAL",48,11,90,DT_LEFT,fg);
-    rounded(306,10,64,28,12,Blend(cfg.color,fg,menuHover?18:7),Blend(cfg.color,fg,menuHover?40:18));
-    text(L"Меню",306,11,64,DT_CENTER,fg);
-    rounded(378,10,30,28,12,Blend(cfg.color,fg,minimizeHover?18:7),Blend(cfg.color,fg,minimizeHover?40:18));
+    rounded(width()-114,10,64,28,12,Blend(cfg.color,fg,menuHover?18:7),Blend(cfg.color,fg,menuHover?40:18));
+    text(L"Меню",width()-114,11,64,DT_CENTER,fg);
+    rounded(width()-42,10,30,28,12,Blend(cfg.color,fg,minimizeHover?18:7),Blend(cfg.color,fg,minimizeHover?40:18));
     HPEN minimizePen=CreatePen(PS_SOLID,std::max(2,px(2)),minimizeHover?fg:muted);
     HGDIOBJ oldMinimizePen=SelectObject(dc,minimizePen);
-    MoveToEx(dc,px(387),px(26),nullptr); LineTo(dc,px(399),px(26));
+    MoveToEx(dc,px(width()-33),px(26),nullptr); LineTo(dc,px(width()-21),px(26));
     SelectObject(dc,oldMinimizePen); DeleteObject(minimizePen);
-    if(CpuSetupActive()) text(L"Установка…",151,11,115,DT_LEFT,accent);
-    else if(saveFailed) text(L"Не сохранено",151,11,115,DT_LEFT,accent);
+    if(width()>=420 && CpuSetupActive()) text(L"Установка…",151,11,115,DT_LEFT,accent);
+    else if(width()>=420 && saveFailed) text(L"Не сохранено",151,11,115,DT_LEFT,accent);
     SelectObject(dc,font); DeleteObject(brand);
     Sample s; { std::lock_guard<std::mutex> lock(sampleMutex); s=latest; }
     if(GetTickCount64()-s.tick>5000) s=Sample{};
@@ -494,26 +544,34 @@ void Paint(HWND hwnd) {
     HPEN pen=CreatePen(PS_SOLID,std::max(1,px(1)),Blend(cfg.color,fg,45));
     HBRUSH cardBrush=CreateSolidBrush(Blend(cfg.color,fg,4));
     HGDIOBJ oldPen=SelectObject(dc,pen), oldBrush=SelectObject(dc,cardBrush);
-    for(int g=0;g<2;g++) {
+    for(int g=0;g<3;g++) {
+        if(!(cfg.panels&(1<<g))) continue;
         int rows=cardRows(g); if(!rows) continue;
-        int cardHeight=114+std::max(cardRows(0),cardRows(1))*26;
-        int left=10+g*205;
-        RoundRect(dc,px(left),px(top),px(left+195),px(top+cardHeight),px(18),px(18));
+        int cardHeight=114+maxRows()*26;
+        int left=cardLeft(g);
+        RoundRect(dc,px(left),px(top),px(left+cardWidth()),px(top+cardHeight),px(18),px(18));
         SelectObject(dc,titleFont);
-        text(g==0?L"CPU":L"GPU",left+13,top+3,190,DT_LEFT,fg);
+        text(g==0?L"CPU":g==1?L"GPU":L"RAM",left+13,top+3,cardWidth()-26,DT_LEFT,fg);
         SelectObject(dc,font);
         int y=top+28;
         for(int j=0;j<2;j++) {
             int i=g*2+j; if(!(cfg.mask&(1<<i))) continue;
             text(j==0?L"Загрузка ▾":L"Температура ▾",left+13,y,116,DT_LEFT,SensorColor(j,cfg.color));
-            text(Value(values[i],j==1),left+124,y,58,DT_RIGHT,fg);
+            text(Value(values[i],j==1),left+cardWidth()-71,y,58,DT_RIGHT,fg);
             y+=26;
         }
-        int graphTop=top+42+std::max(cardRows(0),cardRows(1))*26;
+        if(g>0) {
+            HFONT memoryFont=CreateFontW(-px(12),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+            SelectObject(dc,memoryFont);
+            text(g==1?L"VRAM":L"Занято",left+13,y,47,DT_LEFT,SensorColor(2,cfg.color));
+            text(MemoryValue(g==1?s.gpuUsed:s.ramUsed,g==1?s.gpuTotal:s.ramTotal),left+57,y,cardWidth()-70,DT_RIGHT,fg);
+            SelectObject(dc,font); DeleteObject(memoryFont);
+        }
+        int graphTop=top+42+maxRows()*26;
         DrawHistory(dc,left+13,graphTop,g,muted,cfg.color);
         HFONT timeline=CreateFontW(-px(10),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
         SelectObject(dc,timeline); SetTextColor(dc,muted);
-        RECT time{px(left+13),px(top+cardHeight-19),px(left+182),px(top+cardHeight-4)};
+        RECT time{px(left+13),px(top+cardHeight-19),px(left+cardWidth()-13),px(top+cardHeight-4)};
         DrawTextW(dc,L"−3 мин",-1,&time,DT_LEFT|DT_SINGLELINE|DT_VCENTER);
         DrawTextW(dc,L"сейчас",-1,&time,DT_RIGHT|DT_SINGLELINE|DT_VCENTER);
         SelectObject(dc,font); DeleteObject(timeline);
@@ -662,9 +720,9 @@ void SetupCpu(HWND hwnd,bool automatic) {
 }
 
 void Menu(HWND hwnd,POINT p) {
-    HMENU menu=CreatePopupMenu(), sensors=CreatePopupMenu(), opacity=CreatePopupMenu(), colors=CreatePopupMenu();
-    const wchar_t* labels[]={L"Загрузка CPU",L"Температура CPU (максимум)",L"Загрузка GPU (максимум)",L"Температура GPU (максимум)"};
-    for(int i=0;i<4;i++) AppendMenuW(sensors,MF_STRING|((cfg.mask&(1<<i))?MF_CHECKED:0),100+i,labels[i]);
+    HMENU menu=CreatePopupMenu(), panels=CreatePopupMenu(), sensors=CreatePopupMenu(), opacity=CreatePopupMenu(), colors=CreatePopupMenu();
+    const wchar_t* labels[]={L"Загрузка CPU",L"Температура CPU (максимум)",L"Загрузка GPU (максимум)",L"Температура GPU (максимум)",L"Загрузка RAM",L"Температура RAM"};
+    for(int i=0;i<6;i++) AppendMenuW(sensors,MF_STRING|((cfg.mask&(1<<i))?MF_CHECKED:0),100+i,labels[i]);
     for(int n=20;n<=100;n+=5) {
         std::wstring label=std::to_wstring(100-n)+L" % прозрачности";
         AppendMenuW(opacity,MF_STRING|(cfg.opacity==n?MF_CHECKED:0),200+n,label.c_str());
@@ -672,6 +730,9 @@ void Menu(HWND hwnd,POINT p) {
     const wchar_t* colorNames[]={L"Графит",L"Синий",L"Зелёный",L"Бордовый",L"Светлый",L"Свой цвет…"};
     COLORREF presets[]={RGB(22,26,34),RGB(17,38,65),RGB(17,48,38),RGB(62,25,39),RGB(233,239,247)};
     for(int i=0;i<6;i++) AppendMenuW(colors,MF_STRING|((i<5 && cfg.color==presets[i])?MF_CHECKED:0),400+i,colorNames[i]);
+    const wchar_t* panelNames[]={L"CPU",L"GPU",L"RAM"};
+    for(int g=0;g<3;g++) AppendMenuW(panels,MF_STRING|((cfg.panels&(1<<g))?MF_CHECKED:0)|((cfg.panels==(1<<g))?MF_GRAYED:0),600+g,panelNames[g]);
+    AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(panels),L"Блоки CPU / GPU / RAM");
     AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(sensors),L"Показатели");
     AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(opacity),L"Прозрачность");
     AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(colors),L"Цвет фона");
@@ -681,7 +742,8 @@ void Menu(HWND hwnd,POINT p) {
     AppendMenuW(menu,MF_STRING,501,L"О датчиках");
     SetForegroundWindow(hwnd);
     int id=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,p.x,p.y,0,hwnd,nullptr); DestroyMenu(menu);
-    if(id>=100 && id<104) { int next=cfg.mask^(1<<(id-100)); if((next&3) && (next&12)) cfg.mask=next; }
+    if(id>=600 && id<603) { int next=cfg.panels^(1<<(id-600)); if(next) cfg.panels=next; }
+    else if(id>=100 && id<106) { int next=cfg.mask^(1<<(id-100)); if((next&3) && (next&12) && (next&48)) cfg.mask=next; }
     else if(id>=220 && id<=300) cfg.opacity=id-200;
     else if(id>=400 && id<405) cfg.color=presets[id-400];
     else if(id==405) {
@@ -692,6 +754,7 @@ void Menu(HWND hwnd,POINT p) {
         L"CPU: общая загрузка Windows. На системах с более чем 64 логическими процессорами учитывается основная группа.\n\n"
         L"GPU: по умолчанию Windows, самый загруженный аппаратный движок (принцип Диспетчера задач). Температура округлена до целых градусов. При нескольких GPU максимумы могут относиться к разным адаптерам. В меню строки можно выбрать отдельный движок Windows или датчик NVIDIA NVML. NVML считает загрузку иначе.\n\n"
         L"Температура CPU: встроенная служба (Intel CPU Package / AMD Tdie), резервный источник — Libre Hardware Monitor. Для подключения используйте пункт меню «Настроить температуру CPU».\n\n"
+        L"RAM: занятая физическая память Windows; температура DIMM через Libre Hardware Monitor, если доступна. VRAM: сумма выделенной видеопамяти адаптеров Windows (общая RAM видеокарт сюда не входит); фиолетовая линия показывает процент заполнения.\n\n"
         L"-- означает отсутствие данных, а не нулевую температуру. Обновление примерно раз в секунду.\n\n"
         L"Положение, показатели, цвет и прозрачность сохраняются в %LOCALAPPDATA%\\ThermalOverlay\\settings.ini.\n"
         L"Программа не отправляет данные в сеть.",L"Thermal",MB_OK|MB_ICONINFORMATION);
@@ -703,8 +766,8 @@ void Menu(HWND hwnd,POINT p) {
 void SourceMenu(HWND hwnd,int slot,POINT p) {
     Sample s; { std::lock_guard<std::mutex> lock(sampleMutex); s=latest; }
     HMENU menu=CreatePopupMenu();
-    const wchar_t* defaults[]={L"Windows: общая загрузка CPU",L"Libre Hardware Monitor: максимум CPU",L"Windows: самый загруженный движок GPU",L"Windows: максимум температуры GPU"};
-    std::wstring automatic=slot>=2?L"Авто: "+s.gpuSource:slot==1?L"Авто: "+s.cpuSource:defaults[slot];
+    const wchar_t* defaults[]={L"Windows: общая загрузка CPU",L"Libre Hardware Monitor: максимум CPU",L"Windows: самый загруженный движок GPU",L"Windows: максимум температуры GPU",L"Windows: физическая память",L"Libre Hardware Monitor: максимум DIMM"};
+    std::wstring automatic=slot>=4?defaults[slot]:slot>=2?L"Авто: "+s.gpuSource:slot==1?L"Авто: "+s.cpuSource:defaults[slot];
     AppendMenuW(menu,MF_STRING|(cfg.sources[slot].empty()?MF_CHECKED:0),1,automatic.c_str());
     AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
     std::vector<std::wstring> ids;
@@ -724,9 +787,10 @@ void SourceMenu(HWND hwnd,int slot,POINT p) {
     if(id) { SaveSettings(); InvalidateRect(hwnd,nullptr,FALSE); }
 }
 int HitSensor(int x,int y) {
-    for(int g=0;g<2;g++) {
-        int left=10+g*205;
-        if(x<px(left+10) || x>=px(left+185)) continue;
+    for(int g=0;g<3;g++) {
+        if(!(cfg.panels&(1<<g))) continue;
+        int left=cardLeft(g);
+        if(x<px(left+10) || x>=px(left+cardWidth()-10)) continue;
         int rowY=78;
         for(int j=0;j<2;j++) if(cfg.mask&(1<<(g*2+j))) {
             if(y>=px(rowY) && y<px(rowY+26)) return g*2+j;
@@ -816,10 +880,10 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR command,int) {
         wchar_t temp[MAX_PATH]{};
         if(!GetTempPathW(MAX_PATH,temp)) return 10;
         settingsPath=std::wstring(temp)+L"ThermalOverlay-test-"+std::to_wstring(GetCurrentProcessId())+L".ini";
-        cfg.x=80; cfg.y=80; cfg.opacity=65; cfg.mask=15; cfg.color=RGB(31,57,81); cfg.sources[1]=L"/test/temperature/0";
+        cfg.x=80; cfg.y=80; cfg.opacity=65; cfg.mask=63; cfg.panels=7; cfg.color=RGB(31,57,81); cfg.sources[1]=L"/test/temperature/0";
         SaveSettings();
         if(saveFailed || GetPrivateProfileIntW(L"Window",L"Opacity",0,settingsPath.c_str())!=65 ||
-           GetPrivateProfileIntW(L"Window",L"Sensors",0,settingsPath.c_str())!=15 ||
+           GetPrivateProfileIntW(L"Window",L"Sensors",0,settingsPath.c_str())!=63 ||
            GetPrivateProfileIntW(L"Window",L"Color",0,settingsPath.c_str())!=cfg.color) return 11;
         wchar_t source[128]{};
         GetPrivateProfileStringW(L"Sources",L"1",L"",source,128,settingsPath.c_str());
@@ -830,7 +894,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR command,int) {
     WNDCLASSW wc{}; wc.lpfnWndProc=WindowProc; wc.hInstance=instance; wc.lpszClassName=L"ThermalOverlayWindow";
     wc.hCursor=LoadCursorW(nullptr,IDC_ARROW); wc.hIcon=appIcon?appIcon:LoadIconW(nullptr,IDI_APPLICATION);
     if(!RegisterClassW(&wc) || !stopEvent) return 1;
-    RECT r=VisibleRect(cfg.x,cfg.y,px(420),height());
+    RECT r=VisibleRect(cfg.x,cfg.y,px(width()),height());
     mainWindow=CreateWindowExW(WS_EX_TOPMOST|WS_EX_LAYERED|WS_EX_TOOLWINDOW,wc.lpszClassName,L"Thermal",WS_POPUP,
         r.left,r.top,r.right-r.left,r.bottom-r.top,nullptr,nullptr,instance,nullptr);
     if(!mainWindow) return 2;
@@ -848,6 +912,14 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR command,int) {
         if(GetPrivateProfileIntW(L"Window",L"X",0,settingsPath.c_str())!=static_cast<UINT>(actual.left) ||
            GetPrivateProfileIntW(L"Window",L"Y",0,settingsPath.c_str())!=static_cast<UINT>(actual.top)) ExitProcess(16);
         if(HitSensor(px(30),px(82))!=0 || HitSensor(px(260),px(82))!=2 || cardRows(0)!=2 || cardRows(1)!=2) ExitProcess(17);
+        for(int panels=1;panels<=7;panels++) {
+            cfg.panels=panels; Layout(); SaveSettings();
+            if(panelCount()==1 && cardLeft(0)+cardWidth()!=width()-10) ExitProcess(27);
+            if(GetPrivateProfileIntW(L"Window",L"Panels",0,settingsPath.c_str())!=static_cast<UINT>(panels)) ExitProcess(24);
+            for(int group=0;group<3;group++) if(panels&(1<<group))
+                if(HitSensor(px(cardLeft(group)+20),px(82))!=group*2) ExitProcess(25);
+        }
+        cfg.panels=7; Layout(); SaveSettings();
         SendMessageW(mainWindow,WM_CLOSE,0,0);
         if(!IsWindow(mainWindow)) ExitProcess(21);
         if(!trayVisible || IsWindowVisible(mainWindow)) ExitProcess(18);
@@ -866,6 +938,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR command,int) {
     int result=0;
     if(smoke) {
         std::lock_guard<std::mutex> lock(sampleMutex);
+        if(latest.ram<0 || latest.ram>100 || latest.ramUsed<0 || latest.ramTotal<=0 || latest.ramUsed>latest.ramTotal) result=26;
         if(latest.cpu<0 || latest.cpu>100 || !latest.tick) result=12;
         if(history.size()<2 || history.back().tick-history.front().tick>HistoryDuration) result=20;
         DeleteFileW(settingsPath.c_str());
