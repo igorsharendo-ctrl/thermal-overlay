@@ -799,7 +799,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
 }
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR command,int) {
     bool smoke=std::wstring(command).find(L"--smoke-test")!=std::wstring::npos;
-    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    if(!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
+        SetProcessDPIAware();
     HANDLE singleton=CreateMutexW(nullptr,FALSE,smoke?L"Local\\ThermalOverlaySmoke":L"Local\\ThermalOverlay");
     if(!singleton || GetLastError()==ERROR_ALREADY_EXISTS) {
         if(singleton) {
