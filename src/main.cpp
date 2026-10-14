@@ -45,7 +45,7 @@ NOTIFYICONDATAW tray{};
 bool trayVisible=false;
 HICON appIcon=nullptr;
 UINT taskbarCreated=0;
-struct Settings { int x=80,y=80,opacity=85,mask=63,panels=7; COLORREF color=RGB(22,26,34); std::wstring sources[6]; std::array<int,3> order{0,1,2}; } cfg;
+struct Settings { int x=80,y=80,opacity=85,mask=63,panels=7; COLORREF color=RGB(22,26,34); std::wstring sources[6]; std::array<int,3> order{0,1,2}; bool vertical=false; } cfg;
 struct Choice { std::wstring id, name; int slot; double value; };
 struct Sample { std::vector<Choice> choices; std::wstring cpuSource=L"Libre Hardware Monitor: максимум CPU"; std::wstring gpuSource=L"Windows: максимум среди GPU"; double cpu=-1,gpu=-1,cpuTemp=-1,gpuTemp=-1,ram=-1,ramTemp=-1,ramUsed=-1,ramTotal=-1,gpuUsed=-1,gpuTotal=-1; ULONGLONG tick=0; } latest;
 struct HistoryPoint { ULONGLONG tick; std::array<double,7> values; };
@@ -77,11 +77,14 @@ int px(int v) { return MulDiv(v,static_cast<int>(dpi),96); }
 int rowCount() { int n=0; for(int i=0;i<6;i++) if(cfg.mask&(1<<i)) ++n; return n; }
 int cardRows(int group) { return ((cfg.mask>>(group*2))&1)+((cfg.mask>>(group*2+1))&1); }
 int panelCount() { return !!(cfg.panels&1)+!!(cfg.panels&2)+!!(cfg.panels&4); }
-int width() { return std::max(320,10+205*panelCount()); }
-int cardWidth() { return panelCount()==1?width()-20:195; }
-int cardLeft(int group) { int n=0; for(int g:cfg.order) { if(g==group) break; if(cfg.panels&(1<<g)) ++n; } return 10+n*205; }
+int width() { return cfg.vertical?320:std::max(320,10+205*panelCount()); }
+int cardWidth() { return cfg.vertical || panelCount()==1?width()-20:195; }
+int cardIndex(int group) { int n=0; for(int g:cfg.order) { if(g==group) break; if(cfg.panels&(1<<g)) ++n; } return n; }
+int cardLeft(int group) { return 10+(cfg.vertical?0:cardIndex(group)*205); }
 int maxRows() { int n=0; for(int g=0;g<3;g++) if(cfg.panels&(1<<g)) n=std::max(n,cardRows(g)+(g>0?1:0)); return n; }
-int height() { return px(176+maxRows()*26); }
+int cardHeight() { return 114+maxRows()*26; }
+int cardTop(int group) { return 50+(cfg.vertical?cardIndex(group)*(cardHeight()+10):0); }
+int height() { return px(52+(cfg.vertical?panelCount():1)*(cardHeight()+10)); }
 
 void LoadSettings() {
     PWSTR folder=nullptr;
@@ -93,6 +96,7 @@ void LoadSettings() {
     auto get=[](const wchar_t* key,int def) { return static_cast<int>(GetPrivateProfileIntW(L"Window",key,def,settingsPath.c_str())); };
     cfg.x=std::clamp(get(L"X",80),-100000,100000); cfg.y=std::clamp(get(L"Y",80),-100000,100000);
     cfg.opacity=std::clamp(get(L"Opacity",85),20,100);
+    cfg.vertical=get(L"Vertical",0)!=0;
     cfg.panels=get(L"Panels",7)&7; if(!cfg.panels) cfg.panels=7;
     cfg.mask=get(L"Sensors",63)&63; if(!(cfg.mask&48)) cfg.mask|=48; if(!(cfg.mask&3)) cfg.mask|=3; if(!(cfg.mask&12)) cfg.mask|=12;
     wchar_t order[16]{}; GetPrivateProfileStringW(L"Window",L"Order",L"012",order,16,settingsPath.c_str());
@@ -111,6 +115,7 @@ void SaveSettings() {
     RECT r{}; if(mainWindow && GetWindowRect(mainWindow,&r)) { cfg.x=r.left; cfg.y=r.top; }
     std::wstring s=L"[Window]\r\nX="+std::to_wstring(cfg.x)+L"\r\nY="+std::to_wstring(cfg.y)
         +L"\r\nOpacity="+std::to_wstring(cfg.opacity)+L"\r\nSensors="+std::to_wstring(cfg.mask)
+        +L"\r\nVertical="+std::to_wstring(cfg.vertical?1:0)
         +L"\r\nPanels="+std::to_wstring(cfg.panels)
         +L"\r\nOrder="+std::to_wstring(cfg.order[0])+std::to_wstring(cfg.order[1])+std::to_wstring(cfg.order[2])
         +L"\r\nColor="+std::to_wstring(cfg.color)+L"\r\n";
@@ -547,7 +552,6 @@ void Paint(HWND hwnd) {
     Sample s; { std::lock_guard<std::mutex> lock(sampleMutex); s=latest; }
     if(GetTickCount64()-s.tick>5000) s=Sample{};
     auto values=SelectedValues(s);
-    int top=50;
     HFONT titleFont=CreateFontW(-px(14),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
     HPEN pen=CreatePen(PS_SOLID,std::max(1,px(1)),Blend(cfg.color,fg,45));
     HBRUSH cardBrush=CreateSolidBrush(Blend(cfg.color,fg,4));
@@ -555,7 +559,8 @@ void Paint(HWND hwnd) {
     for(int g=0;g<3;g++) {
         if(!(cfg.panels&(1<<g))) continue;
         int rows=cardRows(g); if(!rows) continue;
-        int cardHeight=114+maxRows()*26;
+        int top=cardTop(g);
+        int cardHeight=::cardHeight();
         int left=cardLeft(g);
         if(cardDragging && dragCard==g && dragPreview) {
             rounded(left,top,cardWidth(),cardHeight,18,Blend(cfg.color,fg,2),Blend(cfg.color,accent,30));
@@ -750,6 +755,7 @@ void Menu(HWND hwnd,POINT p) {
     for(int g=0;g<3;g++) AppendMenuW(panels,MF_STRING|((cfg.panels&(1<<g))?MF_CHECKED:0)|((cfg.panels==(1<<g))?MF_GRAYED:0),600+g,panelNames[g]);
     AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(panels),L"Блоки CPU / GPU / RAM");
     AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(sensors),L"Показатели");
+    AppendMenuW(menu,MF_STRING|(cfg.vertical?MF_CHECKED:0),610,L"Вертикальное расположение");
     AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(opacity),L"Прозрачность");
     AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(colors),L"Цвет фона");
     AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
@@ -759,6 +765,7 @@ void Menu(HWND hwnd,POINT p) {
     SetForegroundWindow(hwnd);
     int id=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,p.x,p.y,0,hwnd,nullptr); DestroyMenu(menu);
     if(id>=600 && id<603) { int next=cfg.panels^(1<<(id-600)); if(next) cfg.panels=next; }
+    else if(id==610) cfg.vertical=!cfg.vertical;
     else if(id>=100 && id<106) { int next=cfg.mask^(1<<(id-100)); if((next&3) && (next&12) && (next&48)) cfg.mask=next; }
     else if(id>=220 && id<=300) cfg.opacity=id-200;
     else if(id>=400 && id<405) cfg.color=presets[id-400];
@@ -807,7 +814,7 @@ int HitSensor(int x,int y) {
         if(!(cfg.panels&(1<<g))) continue;
         int left=cardLeft(g);
         if(x<px(left+10) || x>=px(left+cardWidth()-10)) continue;
-        int rowY=78;
+        int rowY=cardTop(g)+28;
         for(int j=0;j<2;j++) if(cfg.mask&(1<<(g*2+j))) {
             if(y>=px(rowY) && y<px(rowY+26)) return g*2+j;
             rowY+=26;
@@ -817,9 +824,9 @@ int HitSensor(int x,int y) {
 }
 
 int HitCard(int x,int y,bool headerOnly=false) {
-    if(y<px(50) || y>= (headerOnly?px(78):height()-px(12))) return -1;
     for(int group:cfg.order) if(cfg.panels&(1<<group)) {
-        int left=px(cardLeft(group)); if(x>=left && x<left+px(cardWidth())) return group;
+        int left=px(cardLeft(group)),top=px(cardTop(group));
+        if(x>=left && x<left+px(cardWidth()) && y>=top && y<top+px(headerOnly?28:cardHeight())) return group;
     }
     return -1;
 }
@@ -844,7 +851,7 @@ void EndDragPreview() {
 }
 void MoveDragPreview(HWND owner,int x,int y) {
     if(!dragPreview) return;
-    POINT screen{x-(dragStart.x-px(cardLeft(dragCard))),y-(dragStart.y-px(50))};
+    POINT screen{x-(dragStart.x-px(cardLeft(dragCard))),y-(dragStart.y-px(cardTop(dragCard)))};
     ClientToScreen(owner,&screen);
     SetWindowPos(dragPreview,HWND_TOPMOST,screen.x,screen.y,dragSize.cx,dragSize.cy,SWP_NOACTIVATE|SWP_SHOWWINDOW);
 }
@@ -855,7 +862,7 @@ void BeginDragPreview(HWND owner,int x,int y) {
     dragBitmap=CreateCompatibleBitmap(source,dragSize.cx,dragSize.cy);
     if(dragBitmap) {
         HGDIOBJ old=SelectObject(memory,dragBitmap);
-        BitBlt(memory,0,0,dragSize.cx,dragSize.cy,source,px(cardLeft(dragCard)),px(50),SRCCOPY);
+        BitBlt(memory,0,0,dragSize.cx,dragSize.cy,source,px(cardLeft(dragCard)),px(cardTop(dragCard)),SRCCOPY);
         SelectObject(memory,old);
     }
     DeleteDC(memory); ReleaseDC(owner,source);
@@ -972,7 +979,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR command,int) {
         wchar_t temp[MAX_PATH]{};
         if(!GetTempPathW(MAX_PATH,temp)) return 10;
         settingsPath=std::wstring(temp)+L"ThermalOverlay-test-"+std::to_wstring(GetCurrentProcessId())+L".ini";
-        cfg.x=80; cfg.y=80; cfg.opacity=65; cfg.mask=63; cfg.panels=7; cfg.order={0,1,2}; cfg.color=RGB(31,57,81); cfg.sources[1]=L"/test/temperature/0";
+        cfg.x=80; cfg.y=80; cfg.opacity=65; cfg.mask=63; cfg.panels=7; cfg.vertical=false; cfg.order={0,1,2}; cfg.color=RGB(31,57,81); cfg.sources[1]=L"/test/temperature/0";
         SaveSettings();
         if(saveFailed || GetPrivateProfileIntW(L"Window",L"Opacity",0,settingsPath.c_str())!=65 ||
            GetPrivateProfileIntW(L"Window",L"Sensors",0,settingsPath.c_str())!=63 ||
@@ -1004,23 +1011,28 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR command,int) {
         if(GetPrivateProfileIntW(L"Window",L"X",0,settingsPath.c_str())!=static_cast<UINT>(actual.left) ||
            GetPrivateProfileIntW(L"Window",L"Y",0,settingsPath.c_str())!=static_cast<UINT>(actual.top)) ExitProcess(16);
         if(HitSensor(px(30),px(82))!=0 || HitSensor(px(260),px(82))!=2 || cardRows(0)!=2 || cardRows(1)!=2) ExitProcess(17);
+        for(int orientation=0;orientation<2;orientation++) {
+        cfg.vertical=orientation!=0;
         for(int panels=1;panels<=7;panels++) {
             cfg.panels=panels; Layout(); SaveSettings();
+            if(GetPrivateProfileIntW(L"Window",L"Vertical",2,settingsPath.c_str())!=static_cast<UINT>(orientation)) ExitProcess(32);
             if(panelCount()==1 && cardLeft(0)+cardWidth()!=width()-10) ExitProcess(27);
             if(GetPrivateProfileIntW(L"Window",L"Panels",0,settingsPath.c_str())!=static_cast<UINT>(panels)) ExitProcess(24);
             for(int group=0;group<3;group++) if(panels&(1<<group))
-                if(HitSensor(px(cardLeft(group)+20),px(82))!=group*2) ExitProcess(25);
+                if(HitSensor(px(cardLeft(group)+20),px(cardTop(group)+32))!=group*2) ExitProcess(25);
         }
         cfg.panels=7; Layout(); SaveSettings();
-        SendMessageW(mainWindow,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(px(cardLeft(0)+20),px(62)));
-        SendMessageW(mainWindow,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(px(cardLeft(2)+20),px(62)));
+        SendMessageW(mainWindow,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(px(cardLeft(0)+20),px(cardTop(0)+12)));
+        SendMessageW(mainWindow,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(px(cardLeft(2)+20),px(cardTop(2)+12)));
         if(!dragPreview || !dragBitmap || !IsWindowVisible(dragPreview)) ExitProcess(30);
-        SendMessageW(mainWindow,WM_LBUTTONUP,0,MAKELPARAM(px(cardLeft(2)+20),px(62)));
+        SendMessageW(mainWindow,WM_LBUTTONUP,0,MAKELPARAM(px(cardLeft(2)+20),px(cardTop(2)+12)));
         if(dragPreview || dragBitmap) ExitProcess(31);
         if(cfg.order!=std::array<int,3>{2,1,0} || HitSensor(px(30),px(82))!=4) ExitProcess(28);
         wchar_t order[16]{}; GetPrivateProfileStringW(L"Window",L"Order",L"",order,16,settingsPath.c_str());
         if(std::wstring(order)!=L"210") ExitProcess(29);
         cfg.order={0,1,2}; Layout(); SaveSettings();
+        }
+        cfg.vertical=false; Layout(); SaveSettings();
         SendMessageW(mainWindow,WM_CLOSE,0,0);
         if(!IsWindow(mainWindow)) ExitProcess(21);
         if(!trayVisible || IsWindowVisible(mainWindow)) ExitProcess(18);
