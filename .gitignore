@@ -1,0 +1,29 @@
+# Generated binaries: publish EXE as a Git release attachment.
+build/
+out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+*.exe
+*.dll
+*.obj
+*.o
+*.pdb
+*.ilk
+*.log
+*.zip
+# Local settings and private material.
+settings.ini*
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+*.p12
+credentials*
+secrets*
+.vs/
+.vscode/
+.idea/
+.build-tools/
