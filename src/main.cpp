@@ -312,14 +312,29 @@ std::wstring Value(double v,bool temperature) {
     if(v<0 || !std::isfinite(v)) return L"--";
     std::wostringstream out; out<<std::fixed<<std::setprecision(0)<<v<<(temperature?L" °C":L" %"); return out.str();
 }
+void DrawThermometer(HDC dc,int x,int y,int size,COLORREF background,COLORREF outline,COLORREF mercury) {
+    auto at=[&](int v) { return MulDiv(v,size,32); };
+    HGDIOBJ oldPen=SelectObject(dc,GetStockObject(NULL_PEN));
+    HBRUSH shell=CreateSolidBrush(outline),inside=CreateSolidBrush(background),liquid=CreateSolidBrush(mercury);
+    HGDIOBJ oldBrush=SelectObject(dc,shell);
+    RoundRect(dc,x+at(11),y+at(2),x+at(22),y+at(25),at(10),at(10));
+    Ellipse(dc,x+at(7),y+at(16),x+at(26),y+at(32));
+    SelectObject(dc,inside);
+    RoundRect(dc,x+at(14),y+at(5),x+at(19),y+at(25),at(4),at(4));
+    Ellipse(dc,x+at(10),y+at(19),x+at(23),y+at(29));
+    SelectObject(dc,liquid);
+    Rectangle(dc,x+at(15),y+at(11),x+at(18),y+at(25));
+    Ellipse(dc,x+at(12),y+at(21),x+at(21),y+at(28));
+    SelectObject(dc,oldBrush); SelectObject(dc,oldPen);
+    DeleteObject(shell); DeleteObject(inside); DeleteObject(liquid);
+}
 HICON CreateAppIcon() {
     HDC screen=GetDC(nullptr),dc=CreateCompatibleDC(screen);
     HBITMAP color=CreateCompatibleBitmap(screen,32,32),mask=CreateBitmap(32,32,1,1,nullptr);
     HGDIOBJ old=SelectObject(dc,color);
     RECT rect{0,0,32,32}; HBRUSH bg=CreateSolidBrush(RGB(22,26,34)); FillRect(dc,&rect,bg); DeleteObject(bg);
-    HBRUSH accent=CreateSolidBrush(RGB(124,211,238));
-    for(int i=0;i<3;i++) { RECT bar{6+i*8,18-i*5,11+i*8,26}; FillRect(dc,&bar,accent); }
-    DeleteObject(accent); SelectObject(dc,mask); PatBlt(dc,0,0,32,32,BLACKNESS); SelectObject(dc,old);
+    DrawThermometer(dc,0,0,32,RGB(22,26,34),RGB(239,244,250),RGB(124,211,238));
+    SelectObject(dc,mask); PatBlt(dc,0,0,32,32,BLACKNESS); SelectObject(dc,old);
     ICONINFO ii{}; ii.fIcon=TRUE; ii.hbmColor=color; ii.hbmMask=mask;
     HICON result=CreateIconIndirect(&ii); DeleteObject(color); DeleteObject(mask); DeleteDC(dc); ReleaseDC(nullptr,screen);
     return result;
@@ -382,10 +397,7 @@ void Paint(HWND hwnd) {
     rounded(12,10,132,28,12,Blend(cfg.color,accent,12),Blend(cfg.color,accent,28));
     HFONT brand=CreateFontW(-px(13),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
     SelectObject(dc,brand);
-    for(int i=0;i<3;i++) {
-        RECT bar{px(24+i*5),px(26-i*4),px(27+i*5),px(31)};
-        HBRUSH b=CreateSolidBrush(accent); FillRect(dc,&bar,b); DeleteObject(b);
-    }
+    DrawThermometer(dc,px(22),px(13),px(21),Blend(cfg.color,accent,12),fg,accent);
     text(L"THERMAL",48,11,90,DT_LEFT,fg);
     rounded(330,10,64,28,12,Blend(cfg.color,fg,menuHover?18:7),Blend(cfg.color,fg,menuHover?40:18));
     text(L"Меню",330,11,64,DT_CENTER,fg);
