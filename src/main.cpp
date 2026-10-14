@@ -70,7 +70,7 @@ ULONGLONG cpuSetupDeadline=0;
 bool cpuSetupLaunching=false;
 bool CpuSetupActive() { return cpuSetupLaunching || cpuSetupProcess || cpuSetupDeadline; }
 bool saveFailed=false;
-bool menuHover=false, closeHover=false, minimizeHover=false;
+bool menuHover=false, minimizeHover=false;
 int px(int v) { return MulDiv(v,static_cast<int>(dpi),96); }
 int rowCount() { int n=0; for(int i=0;i<4;i++) if(cfg.mask&(1<<i)) ++n; return n; }
 int cardRows(int group) { return ((cfg.mask>>(group*2))&1)+((cfg.mask>>(group*2+1))&1); }
@@ -408,9 +408,8 @@ COLORREF Blend(COLORREF a,COLORREF b,int weight) {
         (GetGValue(a)*(100-weight)+GetGValue(b)*weight)/100,
         (GetBValue(a)*(100-weight)+GetBValue(b)*weight)/100);
 }
-bool HitClose(int x,int y) { return x>=px(378) && x<px(408) && y>=px(10) && y<px(38); }
-bool HitMinimize(int x,int y) { return x>=px(342) && x<px(370) && y>=px(10) && y<px(38); }
-bool HitMenu(int x,int y) { return x>=px(270) && x<px(334) && y>=px(10) && y<px(38); }
+bool HitMinimize(int x,int y) { return x>=px(378) && x<px(408) && y>=px(10) && y<px(38); }
+bool HitMenu(int x,int y) { return x>=px(306) && x<px(370) && y>=px(10) && y<px(38); }
 COLORREF SensorColor(int kind,COLORREF background) {
     bool light=(GetRValue(background)*299+GetGValue(background)*587+GetBValue(background)*114)>145000;
     return kind==1?(light?RGB(165,78,13):RGB(242,158,77)):(light?RGB(0,111,151):RGB(78,183,218));
@@ -477,19 +476,13 @@ void Paint(HWND hwnd) {
     SelectObject(dc,brand);
     DrawThermometer(dc,px(22),px(13),px(21),Blend(cfg.color,accent,12),fg,accent);
     text(L"THERMAL",48,11,90,DT_LEFT,fg);
-    rounded(270,10,64,28,12,Blend(cfg.color,fg,menuHover?18:7),Blend(cfg.color,fg,menuHover?40:18));
-    text(L"Меню",270,11,64,DT_CENTER,fg);
-    rounded(342,10,28,28,12,Blend(cfg.color,fg,minimizeHover?18:7),Blend(cfg.color,fg,minimizeHover?40:18));
+    rounded(306,10,64,28,12,Blend(cfg.color,fg,menuHover?18:7),Blend(cfg.color,fg,menuHover?40:18));
+    text(L"Меню",306,11,64,DT_CENTER,fg);
+    rounded(378,10,30,28,12,Blend(cfg.color,fg,minimizeHover?18:7),Blend(cfg.color,fg,minimizeHover?40:18));
     HPEN minimizePen=CreatePen(PS_SOLID,std::max(2,px(2)),minimizeHover?fg:muted);
     HGDIOBJ oldMinimizePen=SelectObject(dc,minimizePen);
-    MoveToEx(dc,px(351),px(26),nullptr); LineTo(dc,px(362),px(26));
+    MoveToEx(dc,px(387),px(26),nullptr); LineTo(dc,px(399),px(26));
     SelectObject(dc,oldMinimizePen); DeleteObject(minimizePen);
-    rounded(378,10,30,28,12,closeHover?RGB(174,48,62):Blend(cfg.color,fg,7),closeHover?RGB(233,101,113):Blend(cfg.color,fg,18));
-    HPEN cross=CreatePen(PS_SOLID,std::max(2,px(2)),closeHover?RGB(255,255,255):muted);
-    HGDIOBJ previousPen=SelectObject(dc,cross);
-    MoveToEx(dc,px(389),px(20),nullptr); LineTo(dc,px(397),px(28));
-    MoveToEx(dc,px(397),px(20),nullptr); LineTo(dc,px(389),px(28));
-    SelectObject(dc,previousPen); DeleteObject(cross);
     if(CpuSetupActive()) text(L"Установка…",151,11,115,DT_LEFT,accent);
     else if(saveFailed) text(L"Не сохранено",151,11,115,DT_LEFT,accent);
     SelectObject(dc,font); DeleteObject(brand);
@@ -686,7 +679,6 @@ void Menu(HWND hwnd,POINT p) {
     AppendMenuW(menu,MF_STRING|(AutostartEnabled()?MF_CHECKED:0),503,L"Запускать при входе в Windows");
     AppendMenuW(menu,MF_STRING|(CpuSetupActive()?MF_GRAYED:0),504,CpuSetupActive()?L"Установка CPU выполняется…":L"Настроить температуру CPU…");
     AppendMenuW(menu,MF_STRING,501,L"О датчиках");
-    AppendMenuW(menu,MF_STRING,502,L"Выход");
     SetForegroundWindow(hwnd);
     int id=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,p.x,p.y,0,hwnd,nullptr); DestroyMenu(menu);
     if(id>=100 && id<104) { int next=cfg.mask^(1<<(id-100)); if((next&3) && (next&12)) cfg.mask=next; }
@@ -705,7 +697,6 @@ void Menu(HWND hwnd,POINT p) {
         L"Программа не отправляет данные в сеть.",L"Thermal",MB_OK|MB_ICONINFORMATION);
     else if(id==504) SetupCpu(hwnd,false);
     else if(id==503) ToggleAutostart(hwnd);
-    else if(id==502) { DestroyWindow(hwnd); return; }
     if(id) { Layout(); SaveSettings(); }
 }
 
@@ -761,17 +752,17 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         break;
     case WM_SETCURSOR: {
         POINT p{}; GetCursorPos(&p); ScreenToClient(hwnd,&p);
-        if(LOWORD(lp)==HTCLIENT && (HitSensor(p.x,p.y)>=0 || HitMenu(p.x,p.y) || HitClose(p.x,p.y) || HitMinimize(p.x,p.y))) { SetCursor(LoadCursorW(nullptr,IDC_HAND)); return TRUE; }
+        if(LOWORD(lp)==HTCLIENT && (HitSensor(p.x,p.y)>=0 || HitMenu(p.x,p.y) || HitMinimize(p.x,p.y))) { SetCursor(LoadCursorW(nullptr,IDC_HAND)); return TRUE; }
         break;
     }
     case WM_MOUSEMOVE: {
-        bool hover=HitMenu(GET_X_LPARAM(lp),GET_Y_LPARAM(lp)), close=HitClose(GET_X_LPARAM(lp),GET_Y_LPARAM(lp));
+        bool hover=HitMenu(GET_X_LPARAM(lp),GET_Y_LPARAM(lp));
         bool minimize=HitMinimize(GET_X_LPARAM(lp),GET_Y_LPARAM(lp));
-        if(hover!=menuHover || close!=closeHover || minimize!=minimizeHover) { menuHover=hover; closeHover=close; minimizeHover=minimize; InvalidateRect(hwnd,nullptr,FALSE); }
+        if(hover!=menuHover || minimize!=minimizeHover) { menuHover=hover; minimizeHover=minimize; InvalidateRect(hwnd,nullptr,FALSE); }
         TRACKMOUSEEVENT track{}; track.cbSize=sizeof(track); track.dwFlags=TME_LEAVE; track.hwndTrack=hwnd;
         TrackMouseEvent(&track); return 0;
     }
-    case WM_MOUSELEAVE: menuHover=false; closeHover=false; minimizeHover=false; InvalidateRect(hwnd,nullptr,FALSE); return 0;
+    case WM_MOUSELEAVE: menuHover=false; minimizeHover=false; InvalidateRect(hwnd,nullptr,FALSE); return 0;
     case WM_PAINT: Paint(hwnd); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_SAMPLE: {
@@ -788,7 +779,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     case WM_TIMER: if(wp==3) PollCpuSetup(hwnd); InvalidateRect(hwnd,nullptr,FALSE); return 0;
     case WM_LBUTTONDOWN:
         if(HitMinimize(GET_X_LPARAM(lp),GET_Y_LPARAM(lp))) { MinimizeToTray(hwnd); return 0; }
-        if(HitClose(GET_X_LPARAM(lp),GET_Y_LPARAM(lp))) { DestroyWindow(hwnd); return 0; }
         if(int slot=HitSensor(GET_X_LPARAM(lp),GET_Y_LPARAM(lp)); slot>=0) { POINT p{}; GetCursorPos(&p); SourceMenu(hwnd,slot,p); return 0; }
         if(HitMenu(GET_X_LPARAM(lp),GET_Y_LPARAM(lp))) { POINT p{}; GetCursorPos(&p); Menu(hwnd,p); }
         else { ReleaseCapture(); SendMessageW(hwnd,WM_NCLBUTTONDOWN,HTCAPTION,lp); } return 0;
@@ -802,7 +792,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     }
     case WM_DISPLAYCHANGE: Layout(); SaveSettings(); return 0;
     case WM_QUERYENDSESSION: SaveSettings(); return TRUE;
-    case WM_CLOSE: DestroyWindow(hwnd); return 0;
+    case WM_CLOSE: MinimizeToTray(hwnd); return 0;
     case WM_DESTROY: if(cpuSetupProcess) { CloseHandle(cpuSetupProcess); cpuSetupProcess=nullptr; } RemoveTray(); SaveSettings(); SetEvent(stopEvent); PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(hwnd,msg,wp,lp);
@@ -856,11 +846,12 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR command,int) {
         if(GetPrivateProfileIntW(L"Window",L"X",0,settingsPath.c_str())!=static_cast<UINT>(actual.left) ||
            GetPrivateProfileIntW(L"Window",L"Y",0,settingsPath.c_str())!=static_cast<UINT>(actual.top)) ExitProcess(16);
         if(HitSensor(px(30),px(82))!=0 || HitSensor(px(260),px(82))!=2 || cardRows(0)!=2 || cardRows(1)!=2) ExitProcess(17);
-        MinimizeToTray(mainWindow);
+        SendMessageW(mainWindow,WM_CLOSE,0,0);
+        if(!IsWindow(mainWindow)) ExitProcess(21);
         if(!trayVisible || IsWindowVisible(mainWindow)) ExitProcess(18);
         RestoreOverlay(mainWindow);
         if(trayVisible || !IsWindowVisible(mainWindow)) ExitProcess(19);
-        SetTimer(mainWindow,2,4500,[](HWND w,UINT,UINT_PTR, DWORD) { PostMessageW(w,WM_CLOSE,0,0); });
+        SetTimer(mainWindow,2,4500,[](HWND w,UINT,UINT_PTR, DWORD) { DestroyWindow(w); });
     }
     if(!smoke) PostMessageW(mainWindow,WM_APP+4,0,0);
     MSG msg{}; while(GetMessageW(&msg,nullptr,0,0)>0) { TranslateMessage(&msg); DispatchMessageW(&msg); }
