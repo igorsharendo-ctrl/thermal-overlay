@@ -78,6 +78,9 @@ int rowCount() { int n=0; for(int i=0;i<6;i++) if(cfg.mask&(1<<i)) ++n; return n
 int cardRows(int group) { return ((cfg.mask>>(group*2))&1)+((cfg.mask>>(group*2+1))&1); }
 int panelCount() { return !!(cfg.panels&1)+!!(cfg.panels&2)+!!(cfg.panels&4); }
 int width() { return cfg.vertical?215:std::max(320,10+205*panelCount()); }
+int headerWidth() { return std::max(320,width()); }
+int headerBottom() { return 5+MulDiv(38,width(),headerWidth()); }
+int contentTop() { return headerBottom()+7; }
 int cardWidth() { return cfg.vertical || panelCount()==1?width()-20:195; }
 int cardIndex(int group) { int n=0; for(int g:cfg.order) { if(g==group) break; if(cfg.panels&(1<<g)) ++n; } return n; }
 int cardLeft(int group) { return 10+(cfg.vertical?0:cardIndex(group)*205); }
@@ -85,12 +88,12 @@ int maxRows() { int n=0; for(int g=0;g<3;g++) if(cfg.panels&(1<<g)) n=std::max(n
 bool compact() { return cfg.scale[cfg.vertical]<=70; }
 int cardHeight() { return (compact()?90:114)+maxRows()*26; }
 int cardGap() { return compact()?6:10; }
-int cardTop(int group) { return 50+(cfg.vertical?cardIndex(group)*(cardHeight()+cardGap()):0); }
-int logicalHeight() { return 52+(cfg.vertical?panelCount():1)*(cardHeight()+cardGap()); }
+int cardTop(int group) { return contentTop()+(cfg.vertical?cardIndex(group)*(cardHeight()+cardGap()):0); }
+int logicalHeight() { return contentTop()+2+(cfg.vertical?panelCount():1)*(cardHeight()+cardGap()); }
 int height() { return px(logicalHeight()); }
 int heightAtScale(int scale) {
     const int card=(scale<=70?90:114)+maxRows()*26;
-    return MulDiv(52+(cfg.vertical?panelCount():1)*(card+(scale<=70?6:10)),static_cast<int>(dpi)*scale,9600);
+    return MulDiv(contentTop()+2+(cfg.vertical?panelCount():1)*(card+(scale<=70?6:10)),static_cast<int>(dpi)*scale,9600);
 }
 
 void LoadSettings() {
@@ -479,9 +482,8 @@ COLORREF Blend(COLORREF a,COLORREF b,int weight) {
         (GetGValue(a)*(100-weight)+GetGValue(b)*weight)/100,
         (GetBValue(a)*(100-weight)+GetBValue(b)*weight)/100);
 }
-int headerWidth() { return std::max(320,width()); }
 int headerX(int x) { return MulDiv(px(x),width(),headerWidth()); }
-int headerY(int y) { return px(24)+MulDiv(px(y)-px(24),width(),headerWidth()); }
+int headerY(int y) { return px(5)+MulDiv(px(y)-px(5),width(),headerWidth()); }
 bool HitMinimize(int x,int y) { return x>=headerX(headerWidth()-42) && x<headerX(headerWidth()-12) && y>=headerY(10) && y<headerY(38); }
 bool HitMenu(int x,int y) { return x>=headerX(headerWidth()-114) && x<headerX(headerWidth()-50) && y>=headerY(10) && y<headerY(38); }
 COLORREF SensorColor(int kind,COLORREF background) {
@@ -546,12 +548,12 @@ void Paint(HWND hwnd) {
         SelectObject(dc,ob); SelectObject(dc,op); DeleteObject(b); DeleteObject(p);
     };
     rounded(0,0,width()-1,logicalHeight()-1,32,cfg.color,Blend(cfg.color,fg,22));
-    rounded(5,5,width()-10,38,20,Blend(cfg.color,fg,5),Blend(cfg.color,fg,20));
+    rounded(5,5,width()-10,headerBottom()-5,20,Blend(cfg.color,fg,5),Blend(cfg.color,fg,20));
     int headerState=SaveDC(dc);
     SetMapMode(dc,MM_ANISOTROPIC);
     SetWindowExtEx(dc,headerWidth(),headerWidth(),nullptr);
     SetViewportExtEx(dc,width(),width(),nullptr);
-    SetViewportOrgEx(dc,0,px(24)-MulDiv(px(24),width(),headerWidth()),nullptr);
+    SetViewportOrgEx(dc,0,px(5)-MulDiv(px(5),width(),headerWidth()),nullptr);
     rounded(12,10,132,28,12,Blend(cfg.color,accent,12),Blend(cfg.color,accent,28));
     HFONT brand=CreateFontW(-px(13),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
     SelectObject(dc,brand);
@@ -919,7 +921,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         break;
     case WM_SETCURSOR: {
         POINT p{}; GetCursorPos(&p); ScreenToClient(hwnd,&p);
-        if(LOWORD(lp)==HTCLIENT && (HitCard(p.x,p.y,true)>=0 || (p.y<px(46) && !HitMenu(p.x,p.y) && !HitMinimize(p.x,p.y)))) { SetCursor(LoadCursorW(nullptr,IDC_SIZEALL)); return TRUE; }
+        if(LOWORD(lp)==HTCLIENT && (HitCard(p.x,p.y,true)>=0 || (p.y<px(contentTop()-4) && !HitMenu(p.x,p.y) && !HitMinimize(p.x,p.y)))) { SetCursor(LoadCursorW(nullptr,IDC_SIZEALL)); return TRUE; }
         if(LOWORD(lp)==HTCLIENT && (HitSensor(p.x,p.y)>=0 || HitMenu(p.x,p.y) || HitMinimize(p.x,p.y))) { SetCursor(LoadCursorW(nullptr,IDC_HAND)); return TRUE; }
         break;
     }
@@ -971,7 +973,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         if(HitMinimize(GET_X_LPARAM(lp),GET_Y_LPARAM(lp))) { MinimizeToTray(hwnd); return 0; }
         if(int slot=HitSensor(GET_X_LPARAM(lp),GET_Y_LPARAM(lp)); slot>=0) { POINT p{}; GetCursorPos(&p); SourceMenu(hwnd,slot,p); return 0; }
         if(HitMenu(GET_X_LPARAM(lp),GET_Y_LPARAM(lp))) { POINT p{}; GetCursorPos(&p); Menu(hwnd,p); }
-        else if(GET_Y_LPARAM(lp)>=0 && GET_Y_LPARAM(lp)<px(46)) { ReleaseCapture(); SendMessageW(hwnd,WM_NCLBUTTONDOWN,HTCAPTION,lp); } return 0;
+        else if(GET_Y_LPARAM(lp)>=0 && GET_Y_LPARAM(lp)<px(contentTop()-4)) { ReleaseCapture(); SendMessageW(hwnd,WM_NCLBUTTONDOWN,HTCAPTION,lp); } return 0;
     case WM_CONTEXTMENU: {
         POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)}; if(p.x==-1 && p.y==-1) GetCursorPos(&p); Menu(hwnd,p); return 0;
     }
@@ -1069,7 +1071,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR command,int) {
         RECT actual{}; GetWindowRect(mainWindow,&actual);
         if(GetPrivateProfileIntW(L"Window",L"X",0,settingsPath.c_str())!=static_cast<UINT>(actual.left) ||
            GetPrivateProfileIntW(L"Window",L"Y",0,settingsPath.c_str())!=static_cast<UINT>(actual.top)) ExitProcess(16);
-        if(HitSensor(px(30),px(82))!=0 || HitSensor(px(260),px(82))!=2 || cardRows(0)!=2 || cardRows(1)!=2) ExitProcess(17);
+        if(HitSensor(px(30),px(cardTop(cfg.order[0])+32))!=0 || HitSensor(px(260),px(cardTop(cfg.order[0])+32))!=2 || cardRows(0)!=2 || cardRows(1)!=2) ExitProcess(17);
         for(int orientation=0;orientation<2;orientation++) {
         cfg.vertical=orientation!=0;
         if(cfg.vertical && (width()!=215 || cardWidth()!=195)) ExitProcess(33);
@@ -1087,6 +1089,8 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR command,int) {
             if(cfg.scale[orientation]!=std::clamp(zoom,50,200) || target.right-target.left!=px(width()) || target.bottom-target.top!=height()) ExitProcess(34);
             Layout(); SaveSettings();
             if(GetPrivateProfileIntW(L"Window",orientation?L"ScaleVertical":L"ScaleHorizontal",0,settingsPath.c_str())!=static_cast<UINT>(cfg.scale[orientation])) ExitProcess(35);
+            if(headerY(38)>px(headerBottom()) || px(cardTop(cfg.order[0]))-px(headerBottom())<px(6)) ExitProcess(38);
+            if(!HitMenu(headerX(headerWidth()-82),headerY(24)) || !HitMinimize(headerX(headerWidth()-27),headerY(24))) ExitProcess(39);
             RECT client{}; GetClientRect(mainWindow,&client);
             if(client.right!=px(width()) || client.bottom!=height()) ExitProcess(36);
             if(HitSensor(px(cardLeft(0)+20),px(cardTop(0)+32))!=0) ExitProcess(37);
@@ -1098,7 +1102,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR command,int) {
         if(!dragPreview || !dragBitmap || !IsWindowVisible(dragPreview)) ExitProcess(30);
         SendMessageW(mainWindow,WM_LBUTTONUP,0,MAKELPARAM(px(cardLeft(2)+20),px(cardTop(2)+12)));
         if(dragPreview || dragBitmap) ExitProcess(31);
-        if(cfg.order!=std::array<int,3>{2,1,0} || HitSensor(px(30),px(82))!=4) ExitProcess(28);
+        if(cfg.order!=std::array<int,3>{2,1,0} || HitSensor(px(30),px(cardTop(cfg.order[0])+32))!=4) ExitProcess(28);
         wchar_t order[16]{}; GetPrivateProfileStringW(L"Window",L"Order",L"",order,16,settingsPath.c_str());
         if(std::wstring(order)!=L"210") ExitProcess(29);
         cfg.order={0,1,2}; Layout(); SaveSettings();
