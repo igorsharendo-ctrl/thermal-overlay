@@ -1,4 +1,6 @@
-#Requires -RunAsAdministrator
+﻿#Requires -RunAsAdministrator
+param([switch]$Managed)
+$failureCode = 10
 $ErrorActionPreference = 'Stop'
 try {
     $driverInstalled = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO'
@@ -6,10 +8,12 @@ try {
         $installer = Join-Path $PSScriptRoot 'cpu-support\PawnIO_setup.exe'
         if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash -ne '1F519A22E47187F70A1379A48CA604981C4FCF694F4E65B734AAA74A9FBA3032') { throw 'Unexpected PawnIO installer. Rebuild the complete CPU support package.' }
         if ((Get-AuthenticodeSignature -LiteralPath $installer).Status -ne 'Valid') { throw 'PawnIO installer signature is not valid.' }
+        $failureCode = 20
         $install = Start-Process -FilePath $installer -ArgumentList '-install','-silent' -Wait -PassThru -WindowStyle Hidden
-        if ($install.ExitCode -eq 3010) { throw 'PawnIO installed. Restart Windows, then run CPU setup again.' }
+        if ($install.ExitCode -eq 3010) { if (-not $Managed) { Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('Перезагрузите Windows и повторите настройку CPU.','ThermalOverlay') | Out-Null }; exit 3010 }
         if ($install.ExitCode -ne 0) { throw "PawnIO installation failed: $($install.ExitCode)" }
     }
+    $failureCode = 30
     $service = Get-Service -Name ThermalOverlayCpu -ErrorAction SilentlyContinue
     if (-not $service) {
         $destination = Join-Path $env:ProgramFiles 'ThermalOverlay'
@@ -37,7 +41,9 @@ try {
     if ($service.Status -ne 'Running') { Start-Service -Name ThermalOverlayCpu }
     exit 0
 } catch {
-    Add-Type -AssemblyName System.Windows.Forms
-    [System.Windows.Forms.MessageBox]::Show($_.Exception.Message,'ThermalOverlay: CPU setup','OK','Error') | Out-Null
-    exit 1
+    if (-not $Managed) {
+        Add-Type -AssemblyName System.Windows.Forms
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message,'ThermalOverlay: CPU setup','OK','Error') | Out-Null
+    }
+    exit $failureCode
 }

@@ -64,6 +64,11 @@ std::wstring settingsPath;
 HWND mainWindow=nullptr;
 HANDLE stopEvent=nullptr;
 UINT dpi=96;
+HANDLE cpuSetupProcess=nullptr;
+HWND cpuSetupWindow=nullptr,cpuSetupLabel=nullptr;
+ULONGLONG cpuSetupDeadline=0;
+bool cpuSetupLaunching=false;
+bool CpuSetupActive() { return cpuSetupLaunching || cpuSetupProcess || cpuSetupDeadline; }
 bool saveFailed=false;
 bool menuHover=false, closeHover=false, minimizeHover=false;
 int px(int v) { return MulDiv(v,static_cast<int>(dpi),96); }
@@ -485,7 +490,8 @@ void Paint(HWND hwnd) {
     MoveToEx(dc,px(389),px(20),nullptr); LineTo(dc,px(397),px(28));
     MoveToEx(dc,px(397),px(20),nullptr); LineTo(dc,px(389),px(28));
     SelectObject(dc,previousPen); DeleteObject(cross);
-    if(saveFailed) text(L"Не сохранено",151,11,115,DT_LEFT,accent);
+    if(CpuSetupActive()) text(L"Установка…",151,11,115,DT_LEFT,accent);
+    else if(saveFailed) text(L"Не сохранено",151,11,115,DT_LEFT,accent);
     SelectObject(dc,font); DeleteObject(brand);
     Sample s; { std::lock_guard<std::mutex> lock(sampleMutex); s=latest; }
     if(GetTickCount64()-s.tick>5000) s=Sample{};
@@ -554,7 +560,69 @@ bool SupportedCpu() {
     if(vendor==2) { __cpuid(regs,1); unsigned family=(regs[0]>>8)&15; if(family==15) family+=(regs[0]>>20)&255; return family==0x17 || family==0x19 || family==0x1a; }
     return false;
 }
+bool CpuServiceRunning() {
+    SC_HANDLE manager=OpenSCManagerW(nullptr,nullptr,SC_MANAGER_CONNECT); if(!manager) return false;
+    SC_HANDLE service=OpenServiceW(manager,cpu::ServiceName,SERVICE_QUERY_STATUS);
+    SERVICE_STATUS state{}; bool running=service && QueryServiceStatus(service,&state) && state.dwCurrentState==SERVICE_RUNNING;
+    if(service) CloseServiceHandle(service); CloseServiceHandle(manager); return running;
+}
+void ShowCpuSetupStatus(HWND owner,const wchar_t* status) {
+    if(!cpuSetupWindow) {
+        WNDCLASSW wc{}; wc.lpfnWndProc=DefWindowProcW; wc.hInstance=GetModuleHandleW(nullptr);
+        wc.lpszClassName=L"ThermalOverlaySetupStatus"; wc.hCursor=LoadCursorW(nullptr,IDC_ARROW); wc.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_WINDOW+1);
+        RegisterClassW(&wc);
+        RECT ownerRect{}; GetWindowRect(owner,&ownerRect);
+        RECT r=VisibleRect(ownerRect.left,ownerRect.top,px(390),px(130));
+        cpuSetupWindow=CreateWindowExW(WS_EX_TOPMOST|WS_EX_DLGMODALFRAME,wc.lpszClassName,L"Настройка температуры CPU",WS_POPUP|WS_CAPTION,
+            r.left,r.top,px(390),px(130),owner,nullptr,wc.hInstance,nullptr);
+        cpuSetupLabel=CreateWindowExW(0,L"STATIC",L"",WS_CHILD|WS_VISIBLE,px(16),px(16),px(352),px(72),cpuSetupWindow,nullptr,wc.hInstance,nullptr);
+        SendMessageW(cpuSetupLabel,WM_SETFONT,reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),TRUE);
+    }
+    SetWindowTextW(cpuSetupLabel,status); ShowWindow(cpuSetupWindow,SW_SHOWNOACTIVATE); UpdateWindow(cpuSetupWindow);
+    InvalidateRect(owner,nullptr,FALSE); UpdateWindow(owner);
+}
+void FinishCpuSetup(HWND hwnd,const wchar_t* message,UINT icon) {
+    KillTimer(hwnd,3);
+    if(cpuSetupProcess) { CloseHandle(cpuSetupProcess); cpuSetupProcess=nullptr; }
+    cpuSetupDeadline=0; cpuSetupLaunching=false;
+    if(cpuSetupWindow) DestroyWindow(cpuSetupWindow);
+    cpuSetupWindow=nullptr; cpuSetupLabel=nullptr;
+    InvalidateRect(hwnd,nullptr,FALSE);
+    MessageBoxW(hwnd,message,L"Настройка температуры CPU",MB_OK|icon);
+}
+void PollCpuSetup(HWND hwnd) {
+    if(cpuSetupProcess) {
+        DWORD wait=WaitForSingleObject(cpuSetupProcess,0);
+        if(wait==WAIT_TIMEOUT) {
+            ShowCpuSetupStatus(hwnd,cpu::DriverInstalled()?L"Драйвер установлен. Настраиваем и запускаем службу…\n\nПожалуйста, дождитесь завершения.":L"Проверяем и устанавливаем драйвер PawnIO…\n\nПожалуйста, дождитесь завершения.");
+            return;
+        }
+        DWORD code=1;
+        if(wait!=WAIT_OBJECT_0 || !GetExitCodeProcess(cpuSetupProcess,&code)) { FinishCpuSetup(hwnd,L"Не удалось получить результат установки. Проверьте состояние компонентов через меню настройки CPU.",MB_ICONERROR); return; }
+        CloseHandle(cpuSetupProcess); cpuSetupProcess=nullptr;
+        if(code==3010) { FinishCpuSetup(hwnd,L"Драйвер установлен. Для продолжения требуется перезагрузка Windows. После неё запустите программу и завершите настройку службы.",MB_ICONINFORMATION); return; }
+        if(code!=0) {
+            std::wstring error=code==10?L"Не удалось проверить комплект установки или подпись PawnIO. Используйте полную папку build.":code==20?L"Установщик PawnIO завершился с ошибкой. Драйвер не удалось установить.":code==30?L"Не удалось установить или запустить службу ThermalOverlay. Проверьте её состояние в службах Windows.":L"Установка завершилась с ошибкой. Убедитесь, что доступны все файлы из папки build и были предоставлены права администратора.";
+            error+=L"\n\nКод: "+std::to_wstring(code)+L". Повторить настройку можно через меню.";
+            FinishCpuSetup(hwnd,error.c_str(),MB_ICONERROR); return;
+        }
+        if(!cpu::DriverInstalled() || !cpu::ServiceInstalled() || !CpuServiceRunning()) {
+            FinishCpuSetup(hwnd,L"Установщик завершил работу, но драйвер или запущенная служба не обнаружены. Настройка не подтверждена. Проверьте компоненты через меню CPU.",MB_ICONWARNING); return;
+        }
+        cpuSetupDeadline=GetTickCount64()+10000;
+        ShowCpuSetupStatus(hwnd,L"Драйвер и служба установлены.\n\nОжидаем первые показания температуры CPU…");
+    }
+    if(cpuSetupDeadline) {
+        cpu::Snapshot snapshot;
+        if(cpu::ReadShared(snapshot) && snapshot.status==0 && snapshot.count) {
+            FinishCpuSetup(hwnd,L"Готово! Драйвер PawnIO установлен, служба ThermalOverlay запущена.\n\nПоказания температуры CPU получены. При следующих запусках повторная установка не потребуется.",MB_ICONINFORMATION);
+        } else if(GetTickCount64()>=cpuSetupDeadline) {
+            FinishCpuSetup(hwnd,L"Драйвер установлен, служба запущена.\n\nПоказания температуры пока не получены. Виджет продолжит ожидать данные; если остаётся --, нужно проверить доступ к датчикам CPU.",MB_ICONWARNING);
+        }
+    }
+}
 void SetupCpu(HWND hwnd,bool automatic) {
+    if(CpuSetupActive()) { if(cpuSetupWindow) SetForegroundWindow(cpuSetupWindow); return; }
     if(!SupportedCpu()) {
         if(!automatic) MessageBoxW(hwnd,L"Встроенный доступ поддерживает Intel с DTS и AMD Ryzen семейств 17h, 19h, 1Ah. Для остальных CPU доступен Libre Hardware Monitor.",L"Температура CPU",MB_OK|MB_ICONINFORMATION);
         return;
@@ -573,9 +641,19 @@ void SetupCpu(HWND hwnd,bool automatic) {
     if(GetFileAttributesW(script.c_str())==INVALID_FILE_ATTRIBUTES) { MessageBoxW(hwnd,L"Рядом с EXE отсутствует setup-cpu.ps1. Используйте полную папку build с компонентами CPU.",L"Температура CPU",MB_OK|MB_ICONERROR); return; }
     wchar_t system[MAX_PATH]{}; GetSystemDirectoryW(system,MAX_PATH);
     std::wstring powershell=std::wstring(system)+L"\\WindowsPowerShell\\v1.0\\powershell.exe";
-    std::wstring args=L"-NoProfile -ExecutionPolicy Bypass -File \""+script+L"\"";
-    SHELLEXECUTEINFOW execute{}; execute.cbSize=sizeof(execute); execute.hwnd=hwnd; execute.lpVerb=L"runas"; execute.lpFile=powershell.c_str(); execute.lpParameters=args.c_str(); execute.nShow=SW_HIDE;
-    if(!ShellExecuteExW(&execute) && GetLastError()!=ERROR_CANCELLED) MessageBoxW(hwnd,L"Не удалось запустить настройку CPU.",L"Температура CPU",MB_OK|MB_ICONERROR);
+    std::wstring args=L"-NoProfile -ExecutionPolicy Bypass -File \""+script+L"\" -Managed";
+    cpuSetupLaunching=true;
+    ShowCpuSetupStatus(hwnd,L"Ожидаем разрешение Windows…\n\nПодтвердите запрос администратора, чтобы начать установку.");
+    SHELLEXECUTEINFOW execute{}; execute.cbSize=sizeof(execute); execute.fMask=SEE_MASK_NOCLOSEPROCESS|SEE_MASK_NOASYNC; execute.hwnd=hwnd; execute.lpVerb=L"runas"; execute.lpFile=powershell.c_str(); execute.lpParameters=args.c_str(); execute.nShow=SW_HIDE;
+    if(!ShellExecuteExW(&execute)) {
+        DWORD error=GetLastError();
+        FinishCpuSetup(hwnd,error==ERROR_CANCELLED?L"Установка отменена. Её можно запустить позже через меню настройки CPU.":L"Не удалось запустить установку. Проверьте наличие setup-cpu.ps1 в папке программы.",error==ERROR_CANCELLED?MB_ICONINFORMATION:MB_ICONERROR);
+        return;
+    }
+    cpuSetupLaunching=false; cpuSetupProcess=execute.hProcess;
+    if(!cpuSetupProcess) { FinishCpuSetup(hwnd,L"Установщик запущен, но Windows не предоставила доступ к его статусу. Проверьте компоненты через меню после завершения установки.",MB_ICONWARNING); return; }
+    ShowCpuSetupStatus(hwnd,L"Идёт установка драйвера и службы…\n\nПожалуйста, дождитесь сообщения о результате.");
+    SetTimer(hwnd,3,250,nullptr);
 }
 
 void Menu(HWND hwnd,POINT p) {
@@ -594,7 +672,7 @@ void Menu(HWND hwnd,POINT p) {
     AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(colors),L"Цвет фона");
     AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
     AppendMenuW(menu,MF_STRING|(AutostartEnabled()?MF_CHECKED:0),503,L"Запускать при входе в Windows");
-    AppendMenuW(menu,MF_STRING,504,L"Настроить температуру CPU…");
+    AppendMenuW(menu,MF_STRING|(CpuSetupActive()?MF_GRAYED:0),504,CpuSetupActive()?L"Установка CPU выполняется…":L"Настроить температуру CPU…");
     AppendMenuW(menu,MF_STRING,501,L"О датчиках");
     AppendMenuW(menu,MF_STRING,502,L"Выход");
     SetForegroundWindow(hwnd);
@@ -695,7 +773,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         while(!history.empty() && now-history.front().tick>HistoryDuration) history.pop_front();
         InvalidateRect(hwnd,nullptr,FALSE); return 0;
     }
-    case WM_TIMER: InvalidateRect(hwnd,nullptr,FALSE); return 0;
+    case WM_TIMER: if(wp==3) PollCpuSetup(hwnd); InvalidateRect(hwnd,nullptr,FALSE); return 0;
     case WM_LBUTTONDOWN:
         if(HitMinimize(GET_X_LPARAM(lp),GET_Y_LPARAM(lp))) { MinimizeToTray(hwnd); return 0; }
         if(HitClose(GET_X_LPARAM(lp),GET_Y_LPARAM(lp))) { DestroyWindow(hwnd); return 0; }
@@ -713,7 +791,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     case WM_DISPLAYCHANGE: Layout(); SaveSettings(); return 0;
     case WM_QUERYENDSESSION: SaveSettings(); return TRUE;
     case WM_CLOSE: DestroyWindow(hwnd); return 0;
-    case WM_DESTROY: RemoveTray(); SaveSettings(); SetEvent(stopEvent); PostQuitMessage(0); return 0;
+    case WM_DESTROY: if(cpuSetupProcess) { CloseHandle(cpuSetupProcess); cpuSetupProcess=nullptr; } RemoveTray(); SaveSettings(); SetEvent(stopEvent); PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(hwnd,msg,wp,lp);
 }
