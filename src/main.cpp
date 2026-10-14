@@ -383,7 +383,7 @@ bool AddTray(HWND hwnd) {
     tray={}; tray.cbSize=sizeof(tray); tray.hWnd=hwnd; tray.uID=1;
     tray.uFlags=NIF_MESSAGE|NIF_ICON|NIF_TIP; tray.uCallbackMessage=WM_TRAY;
     tray.hIcon=appIcon?appIcon:LoadIconW(nullptr,IDI_APPLICATION);
-    lstrcpynW(tray.szTip,L"ThermalOverlay — нажмите, чтобы показать",128);
+    lstrcpynW(tray.szTip,L"Thermal — нажмите, чтобы показать",128);
     trayVisible=Shell_NotifyIconW(NIM_ADD,&tray)!=FALSE;
     return trayVisible;
 }
@@ -393,7 +393,7 @@ void RestoreOverlay(HWND hwnd) {
 void MinimizeToTray(HWND hwnd) {
     SaveSettings();
     if(trayVisible || AddTray(hwnd)) ShowWindow(hwnd,SW_HIDE);
-    else MessageBoxW(hwnd,L"Не удалось добавить значок в область уведомлений. Окно осталось открытым.",L"ThermalOverlay",MB_OK|MB_ICONINFORMATION);
+    else MessageBoxW(hwnd,L"Не удалось добавить значок в область уведомлений. Окно осталось открытым.",L"Thermal",MB_OK|MB_ICONINFORMATION);
 }
 void TrayMenu(HWND hwnd) {
     HMENU menu=CreatePopupMenu();
@@ -536,6 +536,18 @@ std::wstring StartupCommand() {
     return L"\""+std::wstring(path.data(),length)+L"\"";
 }
 constexpr const wchar_t* StartupKey=L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+// Keep the existing Run value so Windows startup approval remains unchanged.
+void MigrateAutostart() {
+    wchar_t value[32768]{}; DWORD bytes=sizeof(value);
+    std::wstring previous=L"\""+cpu::ExeDir()+L"\\ThermalOverlay.exe\"";
+    std::wstring command=StartupCommand();
+    if(command.empty() || RegGetValueW(HKEY_CURRENT_USER,StartupKey,L"ThermalOverlay",RRF_RT_REG_SZ,nullptr,value,&bytes)!=ERROR_SUCCESS || _wcsicmp(value,previous.c_str())!=0) return;
+    HKEY key=nullptr;
+    if(RegOpenKeyExW(HKEY_CURRENT_USER,StartupKey,0,KEY_SET_VALUE,&key)==ERROR_SUCCESS) {
+        RegSetValueExW(key,L"ThermalOverlay",0,REG_SZ,reinterpret_cast<const BYTE*>(command.c_str()),static_cast<DWORD>((command.size()+1)*sizeof(wchar_t)));
+        RegCloseKey(key);
+    }
+}
 bool AutostartEnabled() {
     wchar_t value[32768]{}; DWORD bytes=sizeof(value);
     return RegGetValueW(HKEY_CURRENT_USER,StartupKey,L"ThermalOverlay",RRF_RT_REG_SZ,nullptr,value,&bytes)==ERROR_SUCCESS && std::wstring(value)==StartupCommand();
@@ -551,7 +563,7 @@ void ToggleAutostart(HWND hwnd) {
         }
         RegCloseKey(key);
     }
-    if(status!=ERROR_SUCCESS) MessageBoxW(hwnd,L"Не удалось изменить автозагрузку для текущего пользователя.",L"ThermalOverlay",MB_OK|MB_ICONERROR);
+    if(status!=ERROR_SUCCESS) MessageBoxW(hwnd,L"Не удалось изменить автозагрузку для текущего пользователя.",L"Thermal",MB_OK|MB_ICONERROR);
 }
 
 bool SupportedCpu() {
@@ -637,8 +649,8 @@ void SetupCpu(HWND hwnd,bool automatic) {
     message+=service?L"• Служба ThermalOverlay — уже установлена.\n":L"• Служба ThermalOverlay — требуется установка.\n";
     message+=L"\nДрайвер даёт доступ к аппаратным датчикам, служба читает температуру в фоне, чтобы виджет не запрашивал права администратора при каждом запуске. Частоты, напряжения и лимиты питания не меняются.\n\nУстановить недостающие компоненты сейчас? Windows запросит права администратора. При отказе программа продолжит работу, установку можно вызвать из меню.";
     if(MessageBoxW(hwnd,message.c_str(),L"Настройка температуры CPU",MB_YESNO|MB_ICONINFORMATION)!=IDYES) return;
-    auto script=cpu::ExeDir()+L"\\setup-cpu.ps1";
-    if(GetFileAttributesW(script.c_str())==INVALID_FILE_ATTRIBUTES) { MessageBoxW(hwnd,L"Рядом с EXE отсутствует setup-cpu.ps1. Используйте полную папку build с компонентами CPU.",L"Температура CPU",MB_OK|MB_ICONERROR); return; }
+    auto script=cpu::ExeDir()+L"\\support\\setup-cpu.ps1";
+    if(GetFileAttributesW(script.c_str())==INVALID_FILE_ATTRIBUTES) { MessageBoxW(hwnd,L"В папке support отсутствует setup-cpu.ps1. Используйте полную папку build с компонентами CPU.",L"Температура CPU",MB_OK|MB_ICONERROR); return; }
     wchar_t system[MAX_PATH]{}; GetSystemDirectoryW(system,MAX_PATH);
     std::wstring powershell=std::wstring(system)+L"\\WindowsPowerShell\\v1.0\\powershell.exe";
     std::wstring args=L"-NoProfile -ExecutionPolicy Bypass -File \""+script+L"\" -Managed";
@@ -647,7 +659,7 @@ void SetupCpu(HWND hwnd,bool automatic) {
     SHELLEXECUTEINFOW execute{}; execute.cbSize=sizeof(execute); execute.fMask=SEE_MASK_NOCLOSEPROCESS|SEE_MASK_NOASYNC; execute.hwnd=hwnd; execute.lpVerb=L"runas"; execute.lpFile=powershell.c_str(); execute.lpParameters=args.c_str(); execute.nShow=SW_HIDE;
     if(!ShellExecuteExW(&execute)) {
         DWORD error=GetLastError();
-        FinishCpuSetup(hwnd,error==ERROR_CANCELLED?L"Установка отменена. Её можно запустить позже через меню настройки CPU.":L"Не удалось запустить установку. Проверьте наличие setup-cpu.ps1 в папке программы.",error==ERROR_CANCELLED?MB_ICONINFORMATION:MB_ICONERROR);
+        FinishCpuSetup(hwnd,error==ERROR_CANCELLED?L"Установка отменена. Её можно запустить позже через меню настройки CPU.":L"Не удалось запустить установку. Проверьте наличие support\\setup-cpu.ps1 в папке программы.",error==ERROR_CANCELLED?MB_ICONINFORMATION:MB_ICONERROR);
         return;
     }
     cpuSetupLaunching=false; cpuSetupProcess=execute.hProcess;
@@ -690,7 +702,7 @@ void Menu(HWND hwnd,POINT p) {
         L"Температура CPU: встроенная служба (Intel CPU Package / AMD Tdie), резервный источник — Libre Hardware Monitor. Для подключения используйте пункт меню «Настроить температуру CPU».\n\n"
         L"-- означает отсутствие данных, а не нулевую температуру. Обновление примерно раз в секунду.\n\n"
         L"Положение, показатели, цвет и прозрачность сохраняются в %LOCALAPPDATA%\\ThermalOverlay\\settings.ini.\n"
-        L"Программа не отправляет данные в сеть.",L"ThermalOverlay",MB_OK|MB_ICONINFORMATION);
+        L"Программа не отправляет данные в сеть.",L"Thermal",MB_OK|MB_ICONINFORMATION);
     else if(id==504) SetupCpu(hwnd,false);
     else if(id==503) ToggleAutostart(hwnd);
     else if(id==502) { DestroyWindow(hwnd); return; }
@@ -808,6 +820,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR command,int) {
     }
     CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
     LoadSettings();
+    if(!smoke) MigrateAutostart();
     if(smoke) {
         wchar_t temp[MAX_PATH]{};
         if(!GetTempPathW(MAX_PATH,temp)) return 10;
@@ -827,7 +840,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR command,int) {
     wc.hCursor=LoadCursorW(nullptr,IDC_ARROW); wc.hIcon=appIcon?appIcon:LoadIconW(nullptr,IDI_APPLICATION);
     if(!RegisterClassW(&wc) || !stopEvent) return 1;
     RECT r=VisibleRect(cfg.x,cfg.y,px(420),height());
-    mainWindow=CreateWindowExW(WS_EX_TOPMOST|WS_EX_LAYERED|WS_EX_TOOLWINDOW,wc.lpszClassName,L"ThermalOverlay",WS_POPUP,
+    mainWindow=CreateWindowExW(WS_EX_TOPMOST|WS_EX_LAYERED|WS_EX_TOOLWINDOW,wc.lpszClassName,L"Thermal",WS_POPUP,
         r.left,r.top,r.right-r.left,r.bottom-r.top,nullptr,nullptr,instance,nullptr);
     if(!mainWindow) return 2;
     dpi=GetDpiForWindow(mainWindow); Layout(); ShowWindow(mainWindow,SW_SHOWNOACTIVATE); SetTimer(mainWindow,1,1000,nullptr);

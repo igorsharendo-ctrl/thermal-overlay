@@ -4,6 +4,7 @@ if(NOT WIN32)
     message(FATAL_ERROR "ThermalOverlay requires Windows")
 endif()
 add_executable(ThermalOverlay WIN32 src/main.cpp)
+set_target_properties(ThermalOverlay PROPERTIES OUTPUT_NAME Thermal)
 target_compile_features(ThermalOverlay PRIVATE cxx_std_17)
 target_link_libraries(ThermalOverlay PRIVATE advapi32 user32 gdi32 comdlg32 shell32 ole32 oleaut32 wbemuuid pdh dxgi uuid)
 if(MSVC)
@@ -26,8 +27,10 @@ else()
 endif()
 add_dependencies(ThermalOverlay ThermalOverlayCpuService)
 add_custom_command(TARGET ThermalOverlay POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/setup-cpu.ps1 $<TARGET_FILE_DIR:ThermalOverlay>/setup-cpu.ps1
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/third_party/pawnio/modules $<TARGET_FILE_DIR:ThermalOverlay>/modules)
+    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:ThermalOverlay>/support
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:ThermalOverlayCpuService> $<TARGET_FILE_DIR:ThermalOverlay>/support/ThermalOverlayCpuService.exe
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/setup-cpu.ps1 $<TARGET_FILE_DIR:ThermalOverlay>/support/setup-cpu.ps1
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/third_party/pawnio/modules $<TARGET_FILE_DIR:ThermalOverlay>/support/modules)
 # build.ps1 additionally packages the verified official PawnIO installer.
 include(CTest)
 if(BUILD_TESTING)
