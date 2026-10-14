@@ -24,6 +24,7 @@
 #include <iomanip>
 #include <array>
 #include <deque>
+#include "cpu_sensors.h"
 
 // Minimal public D3DKMT ABI; dynamically resolved from the system GDI32.
 struct OpenAdapter { LUID luid; UINT handle; };
@@ -46,7 +47,7 @@ HICON appIcon=nullptr;
 UINT taskbarCreated=0;
 struct Settings { int x=80,y=80,opacity=85,mask=15; COLORREF color=RGB(22,26,34); std::wstring sources[4]; } cfg;
 struct Choice { std::wstring id, name; int slot; double value; };
-struct Sample { std::vector<Choice> choices; std::wstring gpuSource=L"Windows: максимум среди GPU"; double cpu=-1,gpu=-1,cpuTemp=-1,gpuTemp=-1; ULONGLONG tick=0; } latest;
+struct Sample { std::vector<Choice> choices; std::wstring cpuSource=L"Libre Hardware Monitor: максимум CPU"; std::wstring gpuSource=L"Windows: максимум среди GPU"; double cpu=-1,gpu=-1,cpuTemp=-1,gpuTemp=-1; ULONGLONG tick=0; } latest;
 struct HistoryPoint { ULONGLONG tick; std::array<double,4> values; };
 std::deque<HistoryPoint> history;
 constexpr ULONGLONG HistoryDuration=180000;
@@ -301,6 +302,16 @@ public:
         items->Release(); return value;
     }
     Sample Read() { Sample s; s.cpu=Cpu(); s.gpu=Gpu(s.choices); s.gpuTemp=GpuTemperature(); s.cpuTemp=CpuTemperature(s.choices);
+        cpu::Snapshot cpuSnapshot;
+        if(cpu::ReadShared(cpuSnapshot) && cpuSnapshot.status==0 && cpuSnapshot.count) {
+            s.cpuTemp=cpuSnapshot.sensors[0].temperature;
+            cpuSnapshot.sensors[0].name[79]=0; s.cpuSource=cpuSnapshot.sensors[0].name;
+            for(unsigned i=0;i<cpuSnapshot.count;i++) {
+                auto& reading=cpuSnapshot.sensors[i]; reading.id[63]=0; reading.name[79]=0;
+                if(std::isfinite(reading.temperature) && reading.temperature>0 && reading.temperature<150)
+                    s.choices.push_back({L"native/"+std::wstring(reading.id),std::wstring(reading.name)+L" · PawnIO",1,reading.temperature});
+            }
+        }
         s.choices.push_back({L"windows/gpu/load",L"Windows: самый загруженный движок среди GPU",2,s.gpu});
         s.choices.push_back({L"windows/gpu/temperature",L"Windows: максимум температуры среди GPU",3,s.gpuTemp});
         nvidia.Read(s); s.tick=GetTickCount64(); return s; }
@@ -537,6 +548,36 @@ void ToggleAutostart(HWND hwnd) {
     if(status!=ERROR_SUCCESS) MessageBoxW(hwnd,L"Не удалось изменить автозагрузку для текущего пользователя.",L"ThermalOverlay",MB_OK|MB_ICONERROR);
 }
 
+bool SupportedCpu() {
+    int vendor=cpu::Vendor(); int regs[4]{};
+    if(vendor==1) { __cpuid(regs,6); return (regs[0]&1)!=0; }
+    if(vendor==2) { __cpuid(regs,1); unsigned family=(regs[0]>>8)&15; if(family==15) family+=(regs[0]>>20)&255; return family==0x17 || family==0x19 || family==0x1a; }
+    return false;
+}
+void SetupCpu(HWND hwnd,bool automatic) {
+    if(!SupportedCpu()) {
+        if(!automatic) MessageBoxW(hwnd,L"Встроенный доступ поддерживает Intel с DTS и AMD Ryzen семейств 17h, 19h, 1Ah. Для остальных CPU доступен Libre Hardware Monitor.",L"Температура CPU",MB_OK|MB_ICONINFORMATION);
+        return;
+    }
+    bool driver=cpu::DriverInstalled(),service=cpu::ServiceInstalled();
+    if(driver && service) {
+        if(!automatic) MessageBoxW(hwnd,L"Драйвер PawnIO и служба ThermalOverlay уже установлены. Повторная установка не требуется. Если температура недоступна, проверьте состояние службы ThermalOverlayCpu в Windows.",L"Температура CPU",MB_OK|MB_ICONINFORMATION);
+        return;
+    }
+    std::wstring message=L"Обнаружен процессор "+std::wstring(cpu::Vendor()==1?L"Intel":L"AMD")+L".\n\nДля чтения температуры CPU нужны:\n";
+    message+=driver?L"• Драйвер PawnIO — уже установлен.\n":L"• Подписанный драйвер PawnIO — требуется установка.\n";
+    message+=service?L"• Служба ThermalOverlay — уже установлена.\n":L"• Служба ThermalOverlay — требуется установка.\n";
+    message+=L"\nДрайвер даёт доступ к аппаратным датчикам, служба читает температуру в фоне, чтобы виджет не запрашивал права администратора при каждом запуске. Частоты, напряжения и лимиты питания не меняются.\n\nУстановить недостающие компоненты сейчас? Windows запросит права администратора. При отказе программа продолжит работу, установку можно вызвать из меню.";
+    if(MessageBoxW(hwnd,message.c_str(),L"Настройка температуры CPU",MB_YESNO|MB_ICONINFORMATION)!=IDYES) return;
+    auto script=cpu::ExeDir()+L"\\setup-cpu.ps1";
+    if(GetFileAttributesW(script.c_str())==INVALID_FILE_ATTRIBUTES) { MessageBoxW(hwnd,L"Рядом с EXE отсутствует setup-cpu.ps1. Используйте полную папку build с компонентами CPU.",L"Температура CPU",MB_OK|MB_ICONERROR); return; }
+    wchar_t system[MAX_PATH]{}; GetSystemDirectoryW(system,MAX_PATH);
+    std::wstring powershell=std::wstring(system)+L"\\WindowsPowerShell\\v1.0\\powershell.exe";
+    std::wstring args=L"-NoProfile -ExecutionPolicy Bypass -File \""+script+L"\"";
+    SHELLEXECUTEINFOW execute{}; execute.cbSize=sizeof(execute); execute.hwnd=hwnd; execute.lpVerb=L"runas"; execute.lpFile=powershell.c_str(); execute.lpParameters=args.c_str(); execute.nShow=SW_HIDE;
+    if(!ShellExecuteExW(&execute) && GetLastError()!=ERROR_CANCELLED) MessageBoxW(hwnd,L"Не удалось запустить настройку CPU.",L"Температура CPU",MB_OK|MB_ICONERROR);
+}
+
 void Menu(HWND hwnd,POINT p) {
     HMENU menu=CreatePopupMenu(), sensors=CreatePopupMenu(), opacity=CreatePopupMenu(), colors=CreatePopupMenu();
     const wchar_t* labels[]={L"Загрузка CPU",L"Температура CPU (максимум)",L"Загрузка GPU (максимум)",L"Температура GPU (максимум)"};
@@ -553,6 +594,7 @@ void Menu(HWND hwnd,POINT p) {
     AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(colors),L"Цвет фона");
     AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
     AppendMenuW(menu,MF_STRING|(AutostartEnabled()?MF_CHECKED:0),503,L"Запускать при входе в Windows");
+    AppendMenuW(menu,MF_STRING,504,L"Настроить температуру CPU…");
     AppendMenuW(menu,MF_STRING,501,L"О датчиках");
     AppendMenuW(menu,MF_STRING,502,L"Выход");
     SetForegroundWindow(hwnd);
@@ -567,10 +609,11 @@ void Menu(HWND hwnd,POINT p) {
     } else if(id==501) MessageBoxW(hwnd,
         L"CPU: общая загрузка Windows. На системах с более чем 64 логическими процессорами учитывается основная группа.\n\n"
         L"GPU: по умолчанию Windows, самый загруженный аппаратный движок (принцип Диспетчера задач). Температура округлена до целых градусов. При нескольких GPU максимумы могут относиться к разным адаптерам. В меню строки можно выбрать отдельный движок Windows или датчик NVIDIA NVML. NVML считает загрузку иначе.\n\n"
-        L"Температура CPU: максимум датчиков CPU из запущенного Libre Hardware Monitor (WMI). Без него — --.\n\n"
+        L"Температура CPU: встроенная служба (Intel CPU Package / AMD Tdie), резервный источник — Libre Hardware Monitor. Для подключения используйте пункт меню «Настроить температуру CPU».\n\n"
         L"-- означает отсутствие данных, а не нулевую температуру. Обновление примерно раз в секунду.\n\n"
         L"Положение, показатели, цвет и прозрачность сохраняются в %LOCALAPPDATA%\\ThermalOverlay\\settings.ini.\n"
         L"Программа не отправляет данные в сеть.",L"ThermalOverlay",MB_OK|MB_ICONINFORMATION);
+    else if(id==504) SetupCpu(hwnd,false);
     else if(id==503) ToggleAutostart(hwnd);
     else if(id==502) { DestroyWindow(hwnd); return; }
     if(id) { Layout(); SaveSettings(); }
@@ -580,7 +623,7 @@ void SourceMenu(HWND hwnd,int slot,POINT p) {
     Sample s; { std::lock_guard<std::mutex> lock(sampleMutex); s=latest; }
     HMENU menu=CreatePopupMenu();
     const wchar_t* defaults[]={L"Windows: общая загрузка CPU",L"Libre Hardware Monitor: максимум CPU",L"Windows: самый загруженный движок GPU",L"Windows: максимум температуры GPU"};
-    std::wstring automatic=slot>=2?L"Авто: "+s.gpuSource:defaults[slot];
+    std::wstring automatic=slot>=2?L"Авто: "+s.gpuSource:slot==1?L"Авто: "+s.cpuSource:defaults[slot];
     AppendMenuW(menu,MF_STRING|(cfg.sources[slot].empty()?MF_CHECKED:0),1,automatic.c_str());
     AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
     std::vector<std::wstring> ids;
@@ -617,6 +660,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         trayVisible=false; if(!AddTray(hwnd)) RestoreOverlay(hwnd); return 0;
     }
     switch(msg) {
+    case WM_APP+4: SetupCpu(hwnd,true); return 0;
     case WM_RESTORE_OVERLAY: RestoreOverlay(hwnd); return 0;
     case WM_TRAY:
         if(lp==WM_LBUTTONUP || lp==WM_LBUTTONDBLCLK) RestoreOverlay(hwnd);
@@ -642,6 +686,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     case WM_ERASEBKGND: return 1;
     case WM_SAMPLE: {
         Sample current; { std::lock_guard<std::mutex> lock(sampleMutex); current=latest; }
+        static std::wstring previousCpuSource;
+        if(cfg.sources[1].empty() && !previousCpuSource.empty() && previousCpuSource!=current.cpuSource)
+            for(auto& point:history) point.values[1]=-1;
+        previousCpuSource=current.cpuSource;
         if(current.tick && (history.empty() || history.back().tick!=current.tick)) history.push_back({current.tick,SelectedValues(current)});
         ULONGLONG now=GetTickCount64();
         while(!history.empty() && now-history.front().tick>HistoryDuration) history.pop_front();
@@ -723,6 +771,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR command,int) {
         if(trayVisible || !IsWindowVisible(mainWindow)) ExitProcess(19);
         SetTimer(mainWindow,2,4500,[](HWND w,UINT,UINT_PTR, DWORD) { PostMessageW(w,WM_CLOSE,0,0); });
     }
+    if(!smoke) PostMessageW(mainWindow,WM_APP+4,0,0);
     MSG msg{}; while(GetMessageW(&msg,nullptr,0,0)>0) { TranslateMessage(&msg); DispatchMessageW(&msg); }
     SetEvent(stopEvent);
     // Local WMI providers can stall. Never leave an invisible process on exit.
