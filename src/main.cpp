@@ -313,20 +313,28 @@ std::wstring Value(double v,bool temperature) {
     std::wostringstream out; out<<std::fixed<<std::setprecision(0)<<v<<(temperature?L" °C":L" %"); return out.str();
 }
 void DrawThermometer(HDC dc,int x,int y,int size,COLORREF background,COLORREF outline,COLORREF mercury) {
+    // A compact temperature instrument: flat gauge, scale and Celsius label.
+    // No bulb silhouette; remains recognizable at notification-area sizes.
     auto at=[&](int v) { return MulDiv(v,size,32); };
-    HGDIOBJ oldPen=SelectObject(dc,GetStockObject(NULL_PEN));
-    HBRUSH shell=CreateSolidBrush(outline),inside=CreateSolidBrush(background),liquid=CreateSolidBrush(mercury);
-    HGDIOBJ oldBrush=SelectObject(dc,shell);
-    RoundRect(dc,x+at(11),y+at(2),x+at(22),y+at(25),at(10),at(10));
-    Ellipse(dc,x+at(7),y+at(16),x+at(26),y+at(32));
-    SelectObject(dc,inside);
-    RoundRect(dc,x+at(14),y+at(5),x+at(19),y+at(25),at(4),at(4));
-    Ellipse(dc,x+at(10),y+at(19),x+at(23),y+at(29));
-    SelectObject(dc,liquid);
-    Rectangle(dc,x+at(15),y+at(11),x+at(18),y+at(25));
-    Ellipse(dc,x+at(12),y+at(21),x+at(21),y+at(28));
-    SelectObject(dc,oldBrush); SelectObject(dc,oldPen);
-    DeleteObject(shell); DeleteObject(inside); DeleteObject(liquid);
+    int saved=SaveDC(dc);
+    HPEN border=CreatePen(PS_SOLID,std::max(1,at(1)),outline);
+    HBRUSH face=CreateSolidBrush(background),liquid=CreateSolidBrush(mercury),track=CreateSolidBrush(outline);
+    SelectObject(dc,border); SelectObject(dc,face);
+    RoundRect(dc,x+at(2),y+at(1),x+at(30),y+at(31),at(7),at(7));
+    RECT rail{x+at(7),y+at(7),x+at(11),y+at(26)};
+    FillRect(dc,&rail,track);
+    RECT level{x+at(7),y+at(16),x+at(11),y+at(26)};
+    FillRect(dc,&level,liquid);
+    for(int i=0;i<3;i++) {
+        int yy=y+at(16+i*5);
+        MoveToEx(dc,x+at(14),yy,nullptr); LineTo(dc,x+at(i==1?19:22),yy);
+    }
+    HFONT unit=CreateFontW(-std::max(7,at(12)),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+    SelectObject(dc,unit); SetBkMode(dc,TRANSPARENT); SetTextColor(dc,mercury);
+    RECT label{x+at(13),y+at(3),x+at(28),y+at(15)};
+    DrawTextW(dc,L"°C",-1,&label,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+    RestoreDC(dc,saved);
+    DeleteObject(unit); DeleteObject(border); DeleteObject(face); DeleteObject(liquid); DeleteObject(track);
 }
 HICON CreateAppIcon() {
     HDC screen=GetDC(nullptr),dc=CreateCompatibleDC(screen);
