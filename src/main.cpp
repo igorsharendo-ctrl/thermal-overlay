@@ -388,7 +388,7 @@ bool AddTray(HWND hwnd) {
     return trayVisible;
 }
 void RestoreOverlay(HWND hwnd) {
-    ShowWindow(hwnd,SW_SHOWNORMAL); Layout(); RemoveTray(); SetForegroundWindow(hwnd);
+    ShowWindow(hwnd,SW_SHOWNORMAL); Layout(); if(!trayVisible) AddTray(hwnd); SetForegroundWindow(hwnd);
 }
 void MinimizeToTray(HWND hwnd) {
     SaveSettings();
@@ -737,7 +737,7 @@ int HitSensor(int x,int y) {
 }
 
 LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
-    if(taskbarCreated && msg==taskbarCreated && trayVisible) {
+    if(taskbarCreated && msg==taskbarCreated) {
         trayVisible=false; if(!AddTray(hwnd)) RestoreOverlay(hwnd); return 0;
     }
     switch(msg) {
@@ -776,7 +776,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         while(!history.empty() && now-history.front().tick>HistoryDuration) history.pop_front();
         InvalidateRect(hwnd,nullptr,FALSE); return 0;
     }
-    case WM_TIMER: if(wp==3) PollCpuSetup(hwnd); InvalidateRect(hwnd,nullptr,FALSE); return 0;
+    case WM_TIMER: if(wp==1 && !trayVisible) AddTray(hwnd); if(wp==3) PollCpuSetup(hwnd); InvalidateRect(hwnd,nullptr,FALSE); return 0;
     case WM_LBUTTONDOWN:
         if(HitMinimize(GET_X_LPARAM(lp),GET_Y_LPARAM(lp))) { MinimizeToTray(hwnd); return 0; }
         if(int slot=HitSensor(GET_X_LPARAM(lp),GET_Y_LPARAM(lp)); slot>=0) { POINT p{}; GetCursorPos(&p); SourceMenu(hwnd,slot,p); return 0; }
@@ -834,10 +834,11 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR command,int) {
     mainWindow=CreateWindowExW(WS_EX_TOPMOST|WS_EX_LAYERED|WS_EX_TOOLWINDOW,wc.lpszClassName,L"Thermal",WS_POPUP,
         r.left,r.top,r.right-r.left,r.bottom-r.top,nullptr,nullptr,instance,nullptr);
     if(!mainWindow) return 2;
-    dpi=GetDpiForWindow(mainWindow); Layout(); ShowWindow(mainWindow,SW_SHOWNOACTIVATE); SetTimer(mainWindow,1,1000,nullptr);
+    dpi=GetDpiForWindow(mainWindow); Layout(); AddTray(mainWindow); ShowWindow(mainWindow,SW_SHOWNOACTIVATE); SetTimer(mainWindow,1,1000,nullptr);
     HANDLE worker=CreateThread(nullptr,0,Worker,nullptr,0,nullptr);
     if(!worker) return 3;
     if(smoke) {
+        if(!trayVisible || !IsWindowVisible(mainWindow)) ExitProcess(22);
         BYTE alpha=0; DWORD flags=0;
         if(!GetLayeredWindowAttributes(mainWindow,nullptr,&alpha,&flags) || alpha!=cfg.opacity*255/100 ||
            !(GetWindowLongPtrW(mainWindow,GWL_EXSTYLE)&WS_EX_TOPMOST)) ExitProcess(15);
@@ -851,7 +852,10 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR command,int) {
         if(!IsWindow(mainWindow)) ExitProcess(21);
         if(!trayVisible || IsWindowVisible(mainWindow)) ExitProcess(18);
         RestoreOverlay(mainWindow);
-        if(trayVisible || !IsWindowVisible(mainWindow)) ExitProcess(19);
+        if(!trayVisible || !IsWindowVisible(mainWindow)) ExitProcess(19);
+        RemoveTray();
+        SendMessageW(mainWindow,taskbarCreated,0,0);
+        if(!trayVisible || !IsWindowVisible(mainWindow)) ExitProcess(23);
         SetTimer(mainWindow,2,4500,[](HWND w,UINT,UINT_PTR, DWORD) { DestroyWindow(w); });
     }
     if(!smoke) PostMessageW(mainWindow,WM_APP+4,0,0);
