@@ -22,6 +22,8 @@
 #include <vector>
 #include <sstream>
 #include <iomanip>
+#include <array>
+#include <deque>
 
 // Minimal public D3DKMT ABI; dynamically resolved from the system GDI32.
 struct OpenAdapter { LUID luid; UINT handle; };
@@ -45,6 +47,17 @@ UINT taskbarCreated=0;
 struct Settings { int x=80,y=80,opacity=85,mask=15; COLORREF color=RGB(22,26,34); std::wstring sources[4]; } cfg;
 struct Choice { std::wstring id, name; int slot; double value; };
 struct Sample { std::vector<Choice> choices; std::wstring gpuSource=L"Windows: максимум среди GPU"; double cpu=-1,gpu=-1,cpuTemp=-1,gpuTemp=-1; ULONGLONG tick=0; } latest;
+struct HistoryPoint { ULONGLONG tick; std::array<double,4> values; };
+std::deque<HistoryPoint> history;
+constexpr ULONGLONG HistoryDuration=180000;
+std::array<double,4> SelectedValues(const Sample& s) {
+    std::array<double,4> values{s.cpu,s.cpuTemp,s.gpu,s.gpuTemp};
+    for(int i=0;i<4;i++) if(!cfg.sources[i].empty()) {
+        values[i]=-1;
+        for(const auto& c:s.choices) if(c.slot==i && c.id==cfg.sources[i]) { values[i]=c.value; break; }
+    }
+    return values;
+}
 std::mutex sampleMutex;
 std::wstring settingsPath;
 HWND mainWindow=nullptr;
@@ -55,7 +68,7 @@ bool menuHover=false, closeHover=false, minimizeHover=false;
 int px(int v) { return MulDiv(v,static_cast<int>(dpi),96); }
 int rowCount() { int n=0; for(int i=0;i<4;i++) if(cfg.mask&(1<<i)) ++n; return n; }
 int cardRows(int group) { return ((cfg.mask>>(group*2))&1)+((cfg.mask>>(group*2+1))&1); }
-int height() { return px(96+std::max(cardRows(0),cardRows(1))*26); }
+int height() { return px(120+std::max(cardRows(0),cardRows(1))*82); }
 
 void LoadSettings() {
     PWSTR folder=nullptr;
@@ -104,10 +117,10 @@ RECT VisibleRect(int x,int y,int w,int h) {
     return {x,y,x+w,y+h};
 }
 void Layout() {
-    RECT r{}; GetWindowRect(mainWindow,&r); r=VisibleRect(r.left,r.top,px(480),height());
+    RECT r{}; GetWindowRect(mainWindow,&r); r=VisibleRect(r.left,r.top,px(420),height());
     SetWindowPos(mainWindow,HWND_TOPMOST,r.left,r.top,r.right-r.left,r.bottom-r.top,SWP_NOACTIVATE);
     SetLayeredWindowAttributes(mainWindow,0,static_cast<BYTE>(cfg.opacity*255/100),LWA_ALPHA);
-    HRGN shape=CreateRoundRectRgn(0,0,px(480)+1,height()+1,px(32),px(32));
+    HRGN shape=CreateRoundRectRgn(0,0,px(420)+1,height()+1,px(32),px(32));
     if(shape && !SetWindowRgn(mainWindow,shape,TRUE)) DeleteObject(shape);
     InvalidateRect(mainWindow,nullptr,FALSE);
 }
@@ -379,9 +392,39 @@ COLORREF Blend(COLORREF a,COLORREF b,int weight) {
         (GetGValue(a)*(100-weight)+GetGValue(b)*weight)/100,
         (GetBValue(a)*(100-weight)+GetBValue(b)*weight)/100);
 }
-bool HitClose(int x,int y) { return x>=px(438) && x<px(468) && y>=px(10) && y<px(38); }
-bool HitMinimize(int x,int y) { return x>=px(402) && x<px(430) && y>=px(10) && y<px(38); }
-bool HitMenu(int x,int y) { return x>=px(330) && x<px(394) && y>=px(10) && y<px(38); }
+bool HitClose(int x,int y) { return x>=px(378) && x<px(408) && y>=px(10) && y<px(38); }
+bool HitMinimize(int x,int y) { return x>=px(342) && x<px(370) && y>=px(10) && y<px(38); }
+bool HitMenu(int x,int y) { return x>=px(270) && x<px(334) && y>=px(10) && y<px(38); }
+void DrawHistory(HDC dc,int left,int top,int slot,COLORREF foreground,COLORREF background) {
+    int saved=SaveDC(dc);
+    const bool temperature=(slot%2)==1;
+    const double maximum=temperature?150.0:100.0;
+    COLORREF color=temperature?RGB(242,158,77):RGB(78,183,218);
+    HFONT small=CreateFontW(-px(10),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+    SelectObject(dc,small); SetBkMode(dc,TRANSPARENT); SetTextColor(dc,foreground);
+    RECT label{px(left),px(top),px(left+169),px(top+15)};
+    DrawTextW(dc,temperature?L"Температура · 0–150 °C":L"Загрузка · 0–100 %",-1,&label,DT_LEFT|DT_SINGLELINE|DT_VCENTER);
+    int x=px(left),y=px(top+17),w=px(169),h=px(30);
+    HPEN grid=CreatePen(PS_SOLID,1,Blend(background,foreground,18)); SelectObject(dc,grid);
+    for(int i=0;i<=2;i++) { MoveToEx(dc,x,y+i*h/2,nullptr); LineTo(dc,x+w,y+i*h/2); }
+    HPEN line=CreatePen(PS_SOLID,std::max(1,px(1)),color); SelectObject(dc,line);
+    ULONGLONG now=GetTickCount64(), previous=0;
+    bool connected=false,any=false;
+    for(const auto& point:history) {
+        double value=point.values[slot];
+        if(now<point.tick || now-point.tick>HistoryDuration || value<0 || !std::isfinite(value)) { connected=false; continue; }
+        int xx=x+w-1-static_cast<int>((now-point.tick)*static_cast<ULONGLONG>(w-1)/HistoryDuration);
+        int yy=y+h-1-static_cast<int>(std::clamp(value/maximum,0.0,1.0)*(h-1));
+        if(connected && point.tick-previous<=2500) LineTo(dc,xx,yy);
+        else { MoveToEx(dc,xx,yy,nullptr); SetPixelV(dc,xx,yy,color); }
+        previous=point.tick; connected=true; any=true;
+    }
+    if(!any) {
+        RECT empty{x,y,x+w,y+h}; SetTextColor(dc,foreground);
+        DrawTextW(dc,L"Нет данных",-1,&empty,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+    }
+    RestoreDC(dc,saved); DeleteObject(small); DeleteObject(grid); DeleteObject(line);
+}
 void Paint(HWND hwnd) {
     PAINTSTRUCT ps{}; HDC target=BeginPaint(hwnd,&ps); RECT r{}; GetClientRect(hwnd,&r);
     HDC dc=CreateCompatibleDC(target); HBITMAP bitmap=CreateCompatibleBitmap(target,r.right,r.bottom);
@@ -401,34 +444,30 @@ void Paint(HWND hwnd) {
         RoundRect(dc,px(x),px(y),px(x+w),px(y+h),px(radius),px(radius));
         SelectObject(dc,ob); SelectObject(dc,op); DeleteObject(b); DeleteObject(p);
     };
-    rounded(0,0,479,height()*96/static_cast<int>(dpi)-1,32,cfg.color,Blend(cfg.color,fg,22));
+    rounded(0,0,419,height()*96/static_cast<int>(dpi)-1,32,cfg.color,Blend(cfg.color,fg,22));
     rounded(12,10,132,28,12,Blend(cfg.color,accent,12),Blend(cfg.color,accent,28));
     HFONT brand=CreateFontW(-px(13),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
     SelectObject(dc,brand);
     DrawThermometer(dc,px(22),px(13),px(21),Blend(cfg.color,accent,12),fg,accent);
     text(L"THERMAL",48,11,90,DT_LEFT,fg);
-    rounded(330,10,64,28,12,Blend(cfg.color,fg,menuHover?18:7),Blend(cfg.color,fg,menuHover?40:18));
-    text(L"Меню",330,11,64,DT_CENTER,fg);
-    rounded(402,10,28,28,12,Blend(cfg.color,fg,minimizeHover?18:7),Blend(cfg.color,fg,minimizeHover?40:18));
+    rounded(270,10,64,28,12,Blend(cfg.color,fg,menuHover?18:7),Blend(cfg.color,fg,menuHover?40:18));
+    text(L"Меню",270,11,64,DT_CENTER,fg);
+    rounded(342,10,28,28,12,Blend(cfg.color,fg,minimizeHover?18:7),Blend(cfg.color,fg,minimizeHover?40:18));
     HPEN minimizePen=CreatePen(PS_SOLID,std::max(2,px(2)),minimizeHover?fg:muted);
     HGDIOBJ oldMinimizePen=SelectObject(dc,minimizePen);
-    MoveToEx(dc,px(411),px(26),nullptr); LineTo(dc,px(422),px(26));
+    MoveToEx(dc,px(351),px(26),nullptr); LineTo(dc,px(362),px(26));
     SelectObject(dc,oldMinimizePen); DeleteObject(minimizePen);
-    rounded(438,10,30,28,12,closeHover?RGB(174,48,62):Blend(cfg.color,fg,7),closeHover?RGB(233,101,113):Blend(cfg.color,fg,18));
+    rounded(378,10,30,28,12,closeHover?RGB(174,48,62):Blend(cfg.color,fg,7),closeHover?RGB(233,101,113):Blend(cfg.color,fg,18));
     HPEN cross=CreatePen(PS_SOLID,std::max(2,px(2)),closeHover?RGB(255,255,255):muted);
     HGDIOBJ previousPen=SelectObject(dc,cross);
-    MoveToEx(dc,px(449),px(20),nullptr); LineTo(dc,px(457),px(28));
-    MoveToEx(dc,px(457),px(20),nullptr); LineTo(dc,px(449),px(28));
+    MoveToEx(dc,px(389),px(20),nullptr); LineTo(dc,px(397),px(28));
+    MoveToEx(dc,px(397),px(20),nullptr); LineTo(dc,px(389),px(28));
     SelectObject(dc,previousPen); DeleteObject(cross);
-    if(saveFailed) text(L"Ошибка сохранения",151,11,175,DT_LEFT,accent);
+    if(saveFailed) text(L"Не сохранено",151,11,115,DT_LEFT,accent);
     SelectObject(dc,font); DeleteObject(brand);
     Sample s; { std::lock_guard<std::mutex> lock(sampleMutex); s=latest; }
     if(GetTickCount64()-s.tick>5000) s=Sample{};
-    double values[]={s.cpu,s.cpuTemp,s.gpu,s.gpuTemp};
-    for(int i=0;i<4;i++) if(!cfg.sources[i].empty()) {
-        values[i]=-1;
-        for(const auto& c:s.choices) if(c.slot==i && c.id==cfg.sources[i]) { values[i]=c.value; break; }
-    }
+    auto values=SelectedValues(s);
     int top=50;
     HFONT titleFont=CreateFontW(-px(14),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
     HPEN pen=CreatePen(PS_SOLID,std::max(1,px(1)),Blend(cfg.color,fg,45));
@@ -436,20 +475,30 @@ void Paint(HWND hwnd) {
     HGDIOBJ oldPen=SelectObject(dc,pen), oldBrush=SelectObject(dc,cardBrush);
     for(int g=0;g<2;g++) {
         int rows=cardRows(g); if(!rows) continue;
-        int cardHeight=34+std::max(cardRows(0),cardRows(1))*26;
-        int left=10+g*235;
-        RoundRect(dc,px(left),px(top),px(left+225),px(top+cardHeight),px(18),px(18));
+        int cardHeight=58+std::max(cardRows(0),cardRows(1))*82;
+        int left=10+g*205;
+        RoundRect(dc,px(left),px(top),px(left+195),px(top+cardHeight),px(18),px(18));
         SelectObject(dc,titleFont);
         text(g==0?L"CPU":L"GPU",left+13,top+3,190,DT_LEFT,fg);
         SelectObject(dc,font);
         int y=top+28;
         for(int j=0;j<2;j++) {
             int i=g*2+j; if(!(cfg.mask&(1<<i))) continue;
-            text(j==0?L"Загрузка ▾":L"Температура ▾",left+13,y,128,DT_LEFT,muted);
-            text(Value(values[i],j==1),left+140,y,72,DT_RIGHT,fg);
+            text(j==0?L"Загрузка ▾":L"Температура ▾",left+13,y,116,DT_LEFT,muted);
+            text(Value(values[i],j==1),left+124,y,58,DT_RIGHT,fg);
             y+=26;
         }
-
+        int graphTop=top+42+std::max(cardRows(0),cardRows(1))*26;
+        for(int j=0;j<2;j++) if(cfg.mask&(1<<(g*2+j))) {
+            DrawHistory(dc,left+13,graphTop,g*2+j,muted,cfg.color);
+            graphTop+=56;
+        }
+        HFONT timeline=CreateFontW(-px(10),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+        SelectObject(dc,timeline); SetTextColor(dc,muted);
+        RECT time{px(left+13),px(top+cardHeight-19),px(left+182),px(top+cardHeight-4)};
+        DrawTextW(dc,L"−3 мин",-1,&time,DT_LEFT|DT_SINGLELINE|DT_VCENTER);
+        DrawTextW(dc,L"сейчас",-1,&time,DT_RIGHT|DT_SINGLELINE|DT_VCENTER);
+        SelectObject(dc,font); DeleteObject(timeline);
     }
     SelectObject(dc,oldPen); SelectObject(dc,oldBrush); DeleteObject(pen); DeleteObject(cardBrush); DeleteObject(titleFont);
     BitBlt(target,0,0,r.right,r.bottom,dc,0,0,SRCCOPY);
@@ -536,14 +585,16 @@ void SourceMenu(HWND hwnd,int slot,POINT p) {
     if(ids.empty()) AppendMenuW(menu,MF_STRING|MF_GRAYED,0,L"Для отдельных датчиков запустите Libre Hardware Monitor");
     SetForegroundWindow(hwnd);
     int id=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,p.x,p.y,0,hwnd,nullptr); DestroyMenu(menu);
+    std::wstring previousSource=cfg.sources[slot];
     if(id==1) cfg.sources[slot].clear();
     else if(id>=101 && static_cast<size_t>(id-101)<ids.size()) cfg.sources[slot]=ids[id-101];
+    if(previousSource!=cfg.sources[slot]) for(auto& point:history) point.values[slot]=-1;
     if(id) { SaveSettings(); InvalidateRect(hwnd,nullptr,FALSE); }
 }
 int HitSensor(int x,int y) {
     for(int g=0;g<2;g++) {
-        int left=10+g*235;
-        if(x<px(left+10) || x>=px(left+215)) continue;
+        int left=10+g*205;
+        if(x<px(left+10) || x>=px(left+185)) continue;
         int rowY=78;
         for(int j=0;j<2;j++) if(cfg.mask&(1<<(g*2+j))) {
             if(y>=px(rowY) && y<px(rowY+26)) return g*2+j;
@@ -581,7 +632,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     case WM_MOUSELEAVE: menuHover=false; closeHover=false; minimizeHover=false; InvalidateRect(hwnd,nullptr,FALSE); return 0;
     case WM_PAINT: Paint(hwnd); return 0;
     case WM_ERASEBKGND: return 1;
-    case WM_SAMPLE: InvalidateRect(hwnd,nullptr,FALSE); return 0;
+    case WM_SAMPLE: {
+        Sample current; { std::lock_guard<std::mutex> lock(sampleMutex); current=latest; }
+        if(current.tick && (history.empty() || history.back().tick!=current.tick)) history.push_back({current.tick,SelectedValues(current)});
+        ULONGLONG now=GetTickCount64();
+        while(!history.empty() && now-history.front().tick>HistoryDuration) history.pop_front();
+        InvalidateRect(hwnd,nullptr,FALSE); return 0;
+    }
     case WM_TIMER: InvalidateRect(hwnd,nullptr,FALSE); return 0;
     case WM_LBUTTONDOWN:
         if(HitMinimize(GET_X_LPARAM(lp),GET_Y_LPARAM(lp))) { MinimizeToTray(hwnd); return 0; }
@@ -635,7 +692,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR command,int) {
     WNDCLASSW wc{}; wc.lpfnWndProc=WindowProc; wc.hInstance=instance; wc.lpszClassName=L"ThermalOverlayWindow";
     wc.hCursor=LoadCursorW(nullptr,IDC_ARROW); wc.hIcon=appIcon?appIcon:LoadIconW(nullptr,IDI_APPLICATION);
     if(!RegisterClassW(&wc) || !stopEvent) return 1;
-    RECT r=VisibleRect(cfg.x,cfg.y,px(480),height());
+    RECT r=VisibleRect(cfg.x,cfg.y,px(420),height());
     mainWindow=CreateWindowExW(WS_EX_TOPMOST|WS_EX_LAYERED|WS_EX_TOOLWINDOW,wc.lpszClassName,L"ThermalOverlay",WS_POPUP,
         r.left,r.top,r.right-r.left,r.bottom-r.top,nullptr,nullptr,instance,nullptr);
     if(!mainWindow) return 2;
@@ -666,6 +723,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR command,int) {
     if(smoke) {
         std::lock_guard<std::mutex> lock(sampleMutex);
         if(latest.cpu<0 || latest.cpu>100 || !latest.tick) result=12;
+        if(history.size()<2 || history.back().tick-history.front().tick>HistoryDuration) result=20;
         DeleteFileW(settingsPath.c_str());
         DeleteFileW((settingsPath+L".tmp").c_str());
     }
